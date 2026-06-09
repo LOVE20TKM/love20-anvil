@@ -149,9 +149,6 @@ export function buildEnvContent(graph, root = repoRoot) {
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_GROUP_ACTION_FACTORY', requiredAddress(extensionGroup, 'groupActionFactoryAddress', 'extension-group/address.extension.group.params'));
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_GROUP_RECIPIENTS', requiredAddress(extensionGroup, 'groupRecipientsAddress', 'extension-group/address.extension.group.params'));
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_GROUP_SERVICE_FACTORY', requiredAddress(extensionGroup, 'groupServiceFactoryAddress', 'extension-group/address.extension.group.params'));
-  if (isAddress(extensionGroup.groupNoticeAddress)) {
-    addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_GROUP_NOTICE', extensionGroup.groupNoticeAddress);
-  }
 
   addSection(lines, 'Optional App Addresses');
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_BATCH_TRANSFER', optionalAddress(batchTransfer, 'batchTransferAddress'));
