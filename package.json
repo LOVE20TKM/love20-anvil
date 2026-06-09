@@ -1,0 +1,14 @@
+{
+  "name": "love20-anvil",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "anvil:start": "anvil --host 127.0.0.1 --port 8545 --chain-id 31337 --block-time 1",
+    "deploy": "node src/cli.mjs deploy",
+    "env": "node src/cli.mjs env",
+    "env:apply": "node src/cli.mjs env --apply",
+    "check": "node src/cli.mjs check",
+    "test": "node --test"
+  }
+}

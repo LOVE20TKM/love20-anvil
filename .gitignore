@@ -1,0 +1,9 @@
+node_modules/
+.foundry/
+.home/
+state/*.json
+state/*.pid
+state/logs/
+!state/.gitkeep
+.env
+.DS_Store

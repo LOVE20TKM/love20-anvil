@@ -1,0 +1,298 @@
+{
+  "network": {
+    "name": "anvil",
+    "chainId": "31337",
+    "rpcUrl": "http://127.0.0.1:8545",
+    "secondsPerBlock": "1"
+  },
+  "nodes": [
+    {
+      "id": "core",
+      "repo": "../core",
+      "usesDefaultKeystore": true,
+      "mirrorFoundryArtifacts": true,
+      "preDeployCommand": "forge clean",
+      "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source 999_check.sh",
+      "outputFiles": [
+        {
+          "path": "address.params",
+          "requiredKeys": [
+            "rootParentTokenAddress",
+            "uniswapV2FactoryAddress",
+            "tokenFactoryAddress",
+            "launchAddress",
+            "stakeAddress",
+            "submitAddress",
+            "voteAddress",
+            "joinAddress",
+            "randomAddress",
+            "verifyAddress",
+            "mintAddress",
+            "firstTokenAddress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "periphery",
+      "repo": "../periphery",
+      "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",
+      "sync": [
+        {
+          "from": "core",
+          "source": "address.params",
+          "target": "address.core.params"
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.params",
+          "requiredKeys": [
+            "tokenViewerAddress",
+            "roundViewerAddress",
+            "mintViewerAddress",
+            "love20HubAddress",
+            "uniswapV2Router02Address"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "extension",
+      "repo": "../extension",
+      "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source 99_check.sh",
+      "sync": [
+        {
+          "from": "core",
+          "source": "address.params",
+          "target": "address.params"
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.extension.center.params",
+          "requiredKeys": [
+            "centerAddress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "extension-lp",
+      "repo": "../extension-lp",
+      "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil && source v2_one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source 99_check.sh && source v2_99_check.sh",
+      "sync": [
+        {
+          "from": "extension",
+          "source": "address.extension.center.params",
+          "target": "address.extension.center.params"
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.extension.lp.params",
+          "requiredKeys": [
+            "lpFactoryAddress"
+          ]
+        },
+        {
+          "path": "address.extension.lp.v2.params",
+          "requiredKeys": [
+            "lpFactoryV2Address"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "group",
+      "repo": "../group",
+      "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source 99_check.sh",
+      "prefill": [
+        {
+          "target": "group.params",
+          "values": {
+            "BASE_DIVISOR": "10000000",
+            "BYTES_THRESHOLD": "7",
+            "MULTIPLIER": "10",
+            "MAX_GROUP_NAME_LENGTH": "64"
+          },
+          "valuesFrom": {
+            "LOVE20_TOKEN_ADDRESS": {
+              "from": "core",
+              "source": "address.params",
+              "key": "firstTokenAddress"
+            }
+          }
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.group.params",
+          "requiredKeys": [
+            "groupAddress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "group-defaults",
+      "repo": "../group",
+      "deployCommand": "cd script/deploy && source group-defaults/one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source group-defaults/99_check.sh",
+      "sync": [
+        {
+          "from": "group",
+          "source": "address.group.params",
+          "target": "address.group.params"
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.group.defaults.params",
+          "requiredKeys": [
+            "groupDefaultsAddress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "group-delegate",
+      "repo": "../group",
+      "deployCommand": "cd script/deploy && source group-delegate/one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source group-delegate/99_check.sh",
+      "sync": [
+        {
+          "from": "group",
+          "source": "address.group.params",
+          "target": "address.group.params"
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.group.delegate.params",
+          "requiredKeys": [
+            "groupDelegateAddress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "extension-group",
+      "repo": "../extension-group",
+      "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source 999_check.sh",
+      "sync": [
+        {
+          "from": "extension",
+          "source": "address.extension.center.params",
+          "target": "address.extension.center.params"
+        },
+        {
+          "from": "group",
+          "source": "address.group.params",
+          "target": "address.group.params"
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.extension.group.params",
+          "requiredKeys": [
+            "groupManagerAddress",
+            "groupJoinAddress",
+            "groupVerifyAddress",
+            "groupActionFactoryAddress",
+            "groupRecipientsAddress",
+            "groupServiceFactoryAddress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "group-chat",
+      "repo": "../group-chat",
+      "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",
+      "checkCommand": "cd script/deploy && source 00_init.sh anvil && source 99_check.sh",
+      "sync": [
+        {
+          "from": "group",
+          "source": "address.group.params",
+          "target": "address.group.params"
+        },
+        {
+          "from": "group-defaults",
+          "source": "address.group.defaults.params",
+          "target": "address.group.defaults.params"
+        },
+        {
+          "from": "group-delegate",
+          "source": "address.group.delegate.params",
+          "target": "address.group.delegate.params"
+        }
+      ],
+      "prefill": [
+        {
+          "target": "group.chat.params",
+          "values": {
+            "actionRecentRounds": "3",
+            "maxContentLength": "4096",
+            "maxMentionedSenderIds": "32",
+            "banThresholdRatio": "3000000000000000",
+            "minSupportToOpposeRatio": "10",
+            "maxAdminIds": "20",
+            "groupChatBeforePostPluginAddress": "0x0000000000000000000000000000000000000000",
+            "groupChatAfterPostPluginAddress": "0x0000000000000000000000000000000000000000"
+          },
+          "valuesFrom": {
+            "extensionCenterAddress": {
+              "from": "extension",
+              "source": "address.extension.center.params",
+              "key": "centerAddress"
+            },
+            "groupJoinAddress": {
+              "from": "extension-group",
+              "source": "address.extension.group.params",
+              "key": "groupJoinAddress"
+            }
+          }
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.group.chat.params",
+          "requiredKeys": [
+            "groupChatAddress",
+            "groupAdminAddress",
+            "groupBanListAddress",
+            "adminBanSourceAddress",
+            "govVotedBanSourceAddress",
+            "groupMemberAddress",
+            "groupMemberScopeAddress",
+            "groupJoinScopeSourceAddress",
+            "tokenMainManagerAddress",
+            "tokenGovManagerAddress",
+            "tokenActionGovManagerAddress",
+            "tokenActionMainManagerAddress"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "batch-transfer",
+      "repo": "../batch-transfer",
+      "deployCommand": "source script/deploy/one_click_deploy.sh anvil",
+      "checkCommand": "source script/deploy/00_init.sh anvil && source script/deploy/99_check.sh",
+      "outputFiles": [
+        {
+          "path": "address.batch-transfer.params",
+          "requiredKeys": [
+            "batchTransferAddress"
+          ]
+        }
+      ]
+    }
+  ]
+}
