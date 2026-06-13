@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { pathToFileURL } from 'node:url';
+
 import {
   checkGraph,
   deployGraph,
@@ -16,6 +18,9 @@ import {
   applyEnvFile,
   writeEnvFile,
 } from './env.mjs';
+import {
+  seedGroupChat,
+} from './group-chat-seed.mjs';
 
 function readOptionValue(argv, index, option) {
   const value = argv[index + 1];
@@ -28,12 +33,13 @@ function readOptionValue(argv, index, option) {
 function usage() {
   console.log(`love20-anvil
 
-Commands:
-  node src/cli.mjs deploy [--from NODE] [--to NODE] [--only NODE] [--skip NODE[,NODE]] [--force]
+命令：
+  node src/cli.mjs deploy [--from NODE] [--to NODE] [--only NODE] [--skip NODE[,NODE]]
   node src/cli.mjs env [--apply]
   node src/cli.mjs check [--no-repo-checks]
+  node src/cli.mjs seed group-chat
 
-Examples:
+示例：
   npm run deploy
   npm run deploy -- --to group-chat
   npm run deploy -- --from group-chat
@@ -41,10 +47,11 @@ Examples:
   npm run deploy -- --skip batch-transfer
   npm run env
   npm run env:apply
-  npm run check`);
+  npm run check
+  npm run seed:group-chat`);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   if (argv[0] === '-h' || argv[0] === '--help') {
     return { help: true, skip: [] };
   }
@@ -54,7 +61,13 @@ function parseArgs(argv) {
     skip: [],
   };
 
-  for (let index = 1; index < argv.length; index += 1) {
+  let optionStart = 1;
+  if (args.command === 'seed') {
+    args.target = argv[1]?.startsWith('-') ? undefined : argv[1];
+    optionStart = args.target ? 2 : 1;
+  }
+
+  for (let index = optionStart; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--from') {
       args.from = readOptionValue(argv, index, arg);
@@ -68,8 +81,6 @@ function parseArgs(argv) {
     } else if (arg === '--skip') {
       args.skip.push(...parseOptionList(readOptionValue(argv, index, arg)));
       index += 1;
-    } else if (arg === '--force') {
-      args.force = true;
     } else if (arg === '--apply') {
       args.apply = true;
     } else if (arg === '--no-repo-checks') {
@@ -116,7 +127,6 @@ async function main() {
   }
 
   if (args.command === 'check') {
-    preflight(graph, deployer, { requireRpc: true, root: repoRoot });
     const statePath = checkGraph(graph, deployer, {
       root: repoRoot,
       runRepoChecks: !args.noRepoChecks,
@@ -125,10 +135,26 @@ async function main() {
     return;
   }
 
+  if (args.command === 'seed') {
+    if (!args.target) {
+      throw new Error('seed requires a target. Supported target: group-chat');
+    }
+    if (args.target !== 'group-chat') {
+      throw new Error(`Unknown seed target: ${args.target}`);
+    }
+    ensureAnvilFiles(graph, deployer, repoRoot);
+    preflight(graph, deployer, { requireRpc: true, root: repoRoot });
+    const statePath = await seedGroupChat(graph, deployer, { root: repoRoot });
+    console.log(`\nGroupChat seed state written to ${statePath}`);
+    return;
+  }
+
   throw new Error(`Unknown command: ${args.command}`);
 }
 
-main().catch((error) => {
-  console.error(`\nError: ${error.message}`);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(`\nError: ${error.message}`);
+    process.exit(1);
+  });
+}

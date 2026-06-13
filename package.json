@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "anvil:start": "anvil --host 127.0.0.1 --port 8545 --chain-id 31337 --block-time 1",
+    "anvil:start": "anvil --host 127.0.0.1 --port 8545 --chain-id 31337 --block-time 3",
     "deploy": "node src/cli.mjs deploy",
     "env": "node src/cli.mjs env",
     "env:apply": "node src/cli.mjs env --apply",
+    "seed:group-chat": "node src/cli.mjs seed group-chat",
     "check": "node src/cli.mjs check",
     "test": "node --test"
   }

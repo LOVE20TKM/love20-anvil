@@ -3,13 +3,14 @@
     "name": "anvil",
     "chainId": "31337",
     "rpcUrl": "http://127.0.0.1:8545",
-    "secondsPerBlock": "1"
+    "secondsPerBlock": "3"
   },
   "nodes": [
     {
       "id": "core",
       "repo": "../core",
       "usesDefaultKeystore": true,
+      "preserveNetworkParams": true,
       "mirrorFoundryArtifacts": true,
       "preDeployCommand": "forge clean",
       "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",

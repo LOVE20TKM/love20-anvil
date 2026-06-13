@@ -230,7 +230,7 @@ export function ensureAccountFile(node, deployer, root = repoRoot) {
 
   const content = [
     `PRIVATE_KEY=${deployer.privateKey}`,
-    '#ETHERSCAN_API_KEY=0x # anvil does not need etherscan',
+    '#ETHERSCAN_API_KEY=0x # anvil 不需要 etherscan',
     '',
     `KEYSTORE_ACCOUNT=${deployer.keystoreAccount}`,
     `ACCOUNT_ADDRESS=${deployer.accountAddress}`,
@@ -244,6 +244,8 @@ export function ensureAccountFile(node, deployer, root = repoRoot) {
 }
 
 export function ensureNetworkParams(node, graph, root = repoRoot) {
+  if (node.preserveNetworkParams) return;
+
   const networkParams = {
     CHAIN_ID: graph.network.chainId,
     SECONDS_PER_BLOCK: graph.network.secondsPerBlock,
@@ -342,6 +344,103 @@ export function validateAllOutputs(graph, root = repoRoot) {
   for (const node of graph.nodes) {
     validateNodeOutputs(graph, node, root);
   }
+}
+
+export function resetNodesForDeploy(graph, options = {}) {
+  return selectNodes(graph, options);
+}
+
+function nodeDependsOn(node, upstreamId) {
+  if ((node.sync || []).some((sync) => sync.from === upstreamId)) return true;
+
+  for (const prefill of node.prefill || []) {
+    if (Object.values(prefill.valuesFrom || {}).some((source) => source.from === upstreamId)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function invalidatedNodesForDeploy(graph, options = {}) {
+  const selected = resetNodesForDeploy(graph, options);
+  if (selected.length === 0) return [];
+
+  const skippedIds = new Set(options.skip || []);
+  const invalidatedIds = new Set(selected.map((node) => node.id));
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (const node of graph.nodes) {
+      if (skippedIds.has(node.id)) continue;
+      if (invalidatedIds.has(node.id)) continue;
+      if (![...invalidatedIds].some((id) => nodeDependsOn(node, id))) continue;
+      invalidatedIds.add(node.id);
+      changed = true;
+    }
+  }
+
+  return graph.nodes.filter((node) => invalidatedIds.has(node.id) && !skippedIds.has(node.id));
+}
+
+export function clearNodeOutputFiles(node, root = repoRoot) {
+  const cleared = [];
+
+  for (const output of node.outputFiles || []) {
+    const absPath = paramsPathForNode(node, output.path, root);
+    mkdirSync(dirname(absPath), { recursive: true });
+    writeFileSync(absPath, '');
+    cleared.push(absPath);
+  }
+
+  return cleared;
+}
+
+export function clearDeployState(root = repoRoot) {
+  const statePath = join(root, 'state/addresses.json');
+  rmSync(statePath, { force: true });
+  return statePath;
+}
+
+export function clearGroupChatSeedState(root = repoRoot) {
+  const statePath = join(root, 'state/group-chat-seed.json');
+  rmSync(statePath, { force: true });
+  return statePath;
+}
+
+export function deployAffectsGroupChatSeed(nodes) {
+  const dependencyIds = new Set([
+    'core',
+    'group',
+    'group-defaults',
+    'group-delegate',
+    'extension',
+    'extension-group',
+    'group-chat',
+  ]);
+  return nodes.some((node) => dependencyIds.has(node.id));
+}
+
+export function resetAnvilDeployOutputs(graph, options = {}, root = repoRoot) {
+  const nodes = resetNodesForDeploy(graph, options);
+  const invalidatedNodes = invalidatedNodesForDeploy(graph, options);
+  const cleared = {
+    outputFiles: [],
+    foundryArtifacts: [],
+    stateFiles: [clearDeployState(root)],
+  };
+
+  for (const node of invalidatedNodes) {
+    cleared.outputFiles.push(...clearNodeOutputFiles(node, root));
+    cleared.foundryArtifacts.push(...clearAnvilFoundryArtifacts(node, root));
+  }
+
+  if (deployAffectsGroupChatSeed(nodes)) {
+    cleared.stateFiles.push(clearGroupChatSeedState(root));
+  }
+
+  return cleared;
 }
 
 export function collectAddresses(graph, root = repoRoot) {
@@ -561,6 +660,17 @@ function anvilFoundryEnv(node, root) {
   };
 }
 
+export function clearAnvilFoundryArtifacts(node, root = repoRoot) {
+  const env = anvilFoundryEnv(node, root);
+  const paths = [env.ANVIL_FOUNDRY_OUT, env.ANVIL_FOUNDRY_CACHE];
+
+  for (const path of paths) {
+    rmSync(path, { recursive: true, force: true });
+  }
+
+  return paths;
+}
+
 export function syncMirroredFoundryArtifacts(node, root = repoRoot) {
   if (!node.mirrorFoundryArtifacts) return [];
 
@@ -611,27 +721,30 @@ export function preflight(graph, deployer, { requireRpc = false, root = repoRoot
 }
 
 export function deployGraph(graph, deployer, options = {}) {
-  preflight(graph, deployer, { requireRpc: true, root: options.root || repoRoot });
-  ensureAnvilFiles(graph, deployer, options.root || repoRoot);
+  const root = options.root || repoRoot;
+
+  preflight(graph, deployer, { requireRpc: true, root });
+  ensureAnvilFiles(graph, deployer, root);
 
   const nodes = selectNodes(graph, options);
+  resetAnvilDeployOutputs(graph, options, root);
   for (const node of nodes) {
     console.log(`\n=== Deploy ${node.id} ===`);
-    prepareNodeInputs(graph, node, options.root || repoRoot);
+    prepareNodeInputs(graph, node, root);
     if (node.preDeployCommand) {
-      runCommand(node.preDeployCommand, repoPathForNode(node, options.root || repoRoot), {
+      runCommand(node.preDeployCommand, repoPathForNode(node, root), {
         network: 'anvil',
         ACCOUNT_ADDRESS: deployer.accountAddress,
         KEYSTORE_ACCOUNT: deployer.keystoreAccount,
         KEYSTORE_PASSWORD_ACCOUNT: deployer.keystoreAccount,
         KEYSTORE_PASSWORD: '',
         PRIVATE_KEY: deployer.privateKey,
-        ...nodeCommandEnv(node, deployer, options.root || repoRoot),
-        ...anvilFoundryEnv(node, options.root || repoRoot),
+        ...nodeCommandEnv(node, deployer, root),
+        ...anvilFoundryEnv(node, root),
       });
     }
-    const commandOptions = nodeCommandOptions(node, deployer, options.root || repoRoot);
-    runCommand(node.deployCommand, repoPathForNode(node, options.root || repoRoot), {
+    const commandOptions = nodeCommandOptions(node, deployer, root);
+    runCommand(node.deployCommand, repoPathForNode(node, root), {
       network: 'anvil',
       ACCOUNT_ADDRESS: deployer.accountAddress,
       KEYSTORE_ACCOUNT: deployer.keystoreAccount,
@@ -639,15 +752,14 @@ export function deployGraph(graph, deployer, options = {}) {
       KEYSTORE_PASSWORD: '',
       PRIVATE_KEY: deployer.privateKey,
       ...commandOptions.env,
-      ...anvilFoundryEnv(node, options.root || repoRoot),
-      FORCE_REDEPLOY: options.force ? '1' : process.env.FORCE_REDEPLOY || '',
+      ...anvilFoundryEnv(node, root),
     }, { input: commandOptions.input });
-    syncMirroredFoundryArtifacts(node, options.root || repoRoot);
-    validateNodeOutputs(graph, node, options.root || repoRoot);
-    writeState(graph, deployer, options.root || repoRoot);
+    syncMirroredFoundryArtifacts(node, root);
+    validateNodeOutputs(graph, node, root);
+    writeState(graph, deployer, root);
   }
 
-  return writeState(graph, deployer, options.root || repoRoot);
+  return writeState(graph, deployer, root);
 }
 
 function lower(value) {
@@ -755,15 +867,27 @@ export function runNodeCheckCommands(graph, deployer, root = repoRoot) {
   }
 }
 
+function prepareGraphInputs(graph, root = repoRoot) {
+  for (const node of graph.nodes) {
+    prepareNodeInputs(graph, node, root);
+  }
+}
+
 export function checkGraph(graph, deployer, { root = repoRoot, runRepoChecks = true } = {}) {
   preflight(graph, deployer, { requireRpc: true, root });
   ensureAnvilFiles(graph, deployer, root);
-  if (runRepoChecks) runNodeCheckCommands(graph, deployer, root);
+  prepareGraphInputs(graph, root);
   validateAllOutputs(graph, root);
+
+  const codeIssues = checkCodeExists(graph, root);
+  if (codeIssues.length > 0) {
+    throw new Error(codeIssues.join('\n'));
+  }
+
+  if (runRepoChecks) runNodeCheckCommands(graph, deployer, root);
 
   const issues = [
     ...checkCrossRepoConsistency(graph, deployer, root),
-    ...checkCodeExists(graph, root),
   ];
 
   if (issues.length > 0) {
