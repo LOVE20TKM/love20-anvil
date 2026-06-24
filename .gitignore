@@ -2,6 +2,7 @@ node_modules/
 .foundry/
 .home/
 state/*.json
+state/*.hex
 state/*.pid
 state/logs/
 !state/.gitkeep

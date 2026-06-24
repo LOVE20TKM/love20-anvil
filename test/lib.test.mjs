@@ -108,6 +108,7 @@ function makeEnvFixture() {
     mintViewerAddress: addr(103),
     love20HubAddress: addr(104),
     uniswapV2Router02Address: addr(105),
+    uniswapV2ZapAddress: addr(106),
   });
   writeAnvilParams(root, 'group', 'address.group.params', { groupAddress: addr(201) });
   writeAnvilParams(root, 'group', 'address.group.defaults.params', { groupDefaultsAddress: addr(202) });
@@ -961,6 +962,7 @@ describe('env generation', () => {
       assert.match(env, /NEXT_PUBLIC_BLOCK_TIME_MS=3000/);
       assert.match(env, /NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT=/);
       assert.match(env, /NEXT_PUBLIC_CONTRACT_ADDRESS_BATCH_TRANSFER=/);
+      assert.match(env, /NEXT_PUBLIC_CONTRACT_ADDRESS_UNISWAP_V2_ZAP=/);
       assert.match(env, /NEXT_PUBLIC_FOUNDRY_GROUP_CHAT_ABI_PATH=\.\.\/love20-anvil\/\.foundry\/group-chat\/out\//);
     } finally {
       rmSync(root, { recursive: true, force: true });

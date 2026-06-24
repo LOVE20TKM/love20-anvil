@@ -119,6 +119,7 @@ export function buildEnvContent(graph, root = repoRoot) {
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_PERIPHERAL_MINTVIEWER', requiredAddress(periphery, 'mintViewerAddress', 'periphery/address.params'));
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_PERIPHERAL_HUB', requiredAddress(periphery, 'love20HubAddress', 'periphery/address.params'));
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_UNISWAP_V2_ROUTER', requiredAddress(periphery, 'uniswapV2Router02Address', 'periphery/address.params'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_UNISWAP_V2_ZAP', requiredAddress(periphery, 'uniswapV2ZapAddress', 'periphery/address.params'));
 
   addSection(lines, 'Group 地址');
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP', requiredAddress(group, 'groupAddress', 'group/address.group.params'));

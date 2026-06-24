@@ -38,6 +38,7 @@
     {
       "id": "periphery",
       "repo": "../periphery",
+      "mirrorFoundryArtifacts": true,
       "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",
       "sync": [
         {
@@ -54,7 +55,8 @@
             "roundViewerAddress",
             "mintViewerAddress",
             "love20HubAddress",
-            "uniswapV2Router02Address"
+            "uniswapV2Router02Address",
+            "uniswapV2ZapAddress"
           ]
         }
       ]
