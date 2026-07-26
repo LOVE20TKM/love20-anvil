@@ -215,6 +215,78 @@
       ]
     },
     {
+      "id": "burn",
+      "repo": "../burn",
+      "deployCommand": "source script/deploy/one_click_deploy.sh anvil",
+      "checkCommand": "source script/deploy/00_init.sh anvil && source script/deploy/99_check.sh",
+      "prefill": [
+        {
+          "target": "burn.params",
+          "values": {
+            "COMMUNITY_WEIGHTS": "1",
+            "START_ROUND": "current",
+            "ROUND_COUNT": "3",
+            "QUOTA_MULTIPLIER": "5"
+          },
+          "valuesFrom": {
+            "EXTENSION_CENTER": {
+              "from": "extension",
+              "source": "address.extension.center.params",
+              "key": "centerAddress"
+            },
+            "SCOPE_TOKEN": {
+              "from": "core",
+              "source": "address.params",
+              "key": "firstTokenAddress"
+            },
+            "COMMUNITY_TOKENS": {
+              "from": "core",
+              "source": "address.params",
+              "key": "firstTokenAddress"
+            },
+            "AIRDROP_TOKEN": {
+              "from": "core",
+              "source": "address.params",
+              "key": "rootParentTokenAddress"
+            }
+          },
+          "valuesFromList": {
+            "SUPPORTED_EXTENSION_FACTORIES": [
+              {
+                "from": "extension-lp",
+                "source": "address.extension.lp.params",
+                "key": "lpFactoryAddress"
+              },
+              {
+                "from": "extension-lp",
+                "source": "address.extension.lp.v2.params",
+                "key": "lpFactoryV2Address"
+              },
+              {
+                "from": "extension-group",
+                "source": "address.extension.group.params",
+                "key": "groupActionFactoryAddress"
+              },
+              {
+                "from": "extension-group",
+                "source": "address.extension.group.params",
+                "key": "groupServiceFactoryAddress"
+              }
+            ]
+          }
+        }
+      ],
+      "outputFiles": [
+        {
+          "path": "address.burn.params",
+          "requiredKeys": [
+            "burnAddress"
+          ]
+        }
+      ],
+      "integrationTest": "integration/burn.mjs"
+    },
+    {
       "id": "group-chat",
       "repo": "../group-chat",
       "deployCommand": "cd script/deploy && source one_click_deploy.sh anvil",

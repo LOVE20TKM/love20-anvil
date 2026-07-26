@@ -14,23 +14,35 @@ import {
 } from '../src/cli.mjs';
 import {
   anvilAccounts,
-  buildGroupChatSeedState,
   CastRunner,
-  clearGroupChatSeedFailure,
-  collectGroupChatSeedAddresses,
-  groupChatSeedPlan,
-  groupChatSeedRoles,
-  groupChatSeedStatePath,
+  expectRevertedTransaction,
+  minePendingTransactions,
   parseTransactionReceipt,
   pauseMining,
-  readAnvilMetadata,
   resumeMining,
-  minePendingTransactions,
   sendMinedTransaction,
   sendPendingTransaction,
   transactionHashFromOutput,
   waitForTransactionReceipt,
+} from '../src/anvil.mjs';
+import {
+  buildGroupChatSeedState,
+  clearGroupChatSeedFailure,
+  collectGroupActionSeedAddresses,
+  collectGroupChatSeedAddresses,
+  groupChatSeedPlan,
+  groupChatSeedRoles,
+  groupChatSeedStatePath,
+  readAnvilMetadata,
 } from '../src/group-chat-seed.mjs';
+import {
+  integrationNode,
+  integrationTargets,
+  runIntegrationTest,
+} from '../src/integration.mjs';
+import {
+  burnInterfaceFunctions,
+} from '../integration/burn.mjs';
 import {
   anvilKeystoreHome,
   clearDeployState,
@@ -41,6 +53,7 @@ import {
   formatParams,
   invalidatedNodesForDeploy,
   parseParams,
+  prepareNodeInputs,
   resetAnvilDeployOutputs,
   resetNodesForDeploy,
   selectNodes,
@@ -304,6 +317,47 @@ describe('anvil keystore', () => {
 });
 
 describe('foundry artifacts', () => {
+  it('prefills a comma-separated parameter from multiple upstream addresses', () => {
+    const root = mkdtempSync(join(tmpdir(), 'love20-anvil-test-'));
+    const graph = {
+      nodes: [
+        { id: 'extension-lp', repo: 'extension-lp' },
+        { id: 'extension-group', repo: 'extension-group' },
+        {
+          id: 'burn',
+          repo: 'burn',
+          prefill: [{
+            target: 'burn.params',
+            valuesFromList: {
+              SUPPORTED_EXTENSION_FACTORIES: [
+                { from: 'extension-lp', source: 'address.extension.lp.params', key: 'lpFactoryAddress' },
+                { from: 'extension-lp', source: 'address.extension.lp.v2.params', key: 'lpFactoryV2Address' },
+                { from: 'extension-group', source: 'address.extension.group.params', key: 'groupActionFactoryAddress' },
+                { from: 'extension-group', source: 'address.extension.group.params', key: 'groupServiceFactoryAddress' },
+              ],
+            },
+          }],
+        },
+      ],
+    };
+
+    try {
+      writeAnvilParams(root, 'extension-lp', 'address.extension.lp.params', { lpFactoryAddress: addr(1) });
+      writeAnvilParams(root, 'extension-lp', 'address.extension.lp.v2.params', { lpFactoryV2Address: addr(2) });
+      writeAnvilParams(root, 'extension-group', 'address.extension.group.params', {
+        groupActionFactoryAddress: addr(3),
+        groupServiceFactoryAddress: addr(4),
+      });
+
+      prepareNodeInputs(graph, graph.nodes[2], root);
+
+      const params = parseParams(readFileSync(join(root, 'burn/script/network/anvil/burn.params'), 'utf8'));
+      assert.equal(params.SUPPORTED_EXTENSION_FACTORIES, [addr(1), addr(2), addr(3), addr(4)].join(','));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('preserves core network params while generating other node network params', () => {
     const root = mkdtempSync(join(tmpdir(), 'love20-anvil-test-'));
     const deployer = {
@@ -545,6 +599,15 @@ describe('CLI options', () => {
     });
   });
 
+  it('parses an integration target and state option', () => {
+    assert.deepEqual(parseArgs(['integration', 'burn', '--keep-state']), {
+      command: 'integration',
+      target: 'burn',
+      keepState: true,
+      skip: [],
+    });
+  });
+
   it('rejects missing option values before deployment', () => {
     const result = spawnSync(process.execPath, ['src/cli.mjs', 'deploy', '--from'], {
       cwd: join(testDir, '..'),
@@ -605,6 +668,113 @@ describe('CLI options', () => {
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Unknown seed target: missing/);
     assert.doesNotMatch(result.stderr, /Anvil RPC is not reachable/);
+  });
+
+  it('rejects a missing integration target before RPC preflight', () => {
+    const result = spawnSync(process.execPath, ['src/cli.mjs', 'integration'], {
+      cwd: join(testDir, '..'),
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /integration requires a target/);
+    assert.doesNotMatch(result.stderr, /Anvil RPC is not reachable/);
+  });
+});
+
+describe('integration runner', () => {
+  const deployer = { accountAddress: addr(1), privateKey: '0x01', keystoreAccount: 'anvil' };
+
+  function fixture(source = 'export async function run({ node }) { if (node.id !== "burn") throw new Error("wrong node"); }') {
+    const root = mkdtempSync(join(tmpdir(), 'love20-anvil-integration-test-'));
+    const graph = {
+      network: { rpcUrl: 'http://127.0.0.1:8545' },
+      nodes: [
+        {
+          id: 'burn',
+          repo: 'burn',
+          integrationTest: 'integration/burn.mjs',
+          outputFiles: [{ path: 'address.burn.params', requiredKeys: ['burnAddress'] }],
+        },
+      ],
+    };
+    writeAnvilParams(root, 'burn', 'address.burn.params', { burnAddress: addr(2) });
+    mkdirSync(join(root, 'integration'), { recursive: true });
+    writeFileSync(join(root, 'integration/burn.mjs'), source);
+    return { graph, root };
+  }
+
+  function fakeRunner() {
+    const calls = [];
+    return {
+      calls,
+      rpc(method, params) {
+        calls.push([method, params]);
+        if (method === 'evm_snapshot') return '"0x1"';
+        if (method === 'evm_revert') return 'true';
+        throw new Error(`Unexpected RPC method: ${method}`);
+      },
+    };
+  }
+
+  it('discovers configured targets and rejects unconfigured nodes', () => {
+    const graph = { nodes: [{ id: 'core' }, { id: 'burn', integrationTest: 'integration/burn.mjs' }] };
+    assert.deepEqual(integrationTargets(graph), ['burn']);
+    assert.equal(integrationNode(graph, 'burn').id, 'burn');
+    assert.throws(() => integrationNode(graph, 'core'), /No integration test configured/);
+  });
+
+  it('keeps the Burn runtime coverage list aligned with IBurn', () => {
+    const source = readFileSync(join(testDir, '../../burn/src/interface/IBurn.sol'), 'utf8');
+    const publicInterface = source.slice(source.indexOf('interface IBurn is'));
+    const functions = [...publicInterface.matchAll(/\bfunction\s+(\w+)\s*\(/g)].map((match) => match[1]);
+
+    assert.equal(functions.length, 33);
+    assert.deepEqual([...burnInterfaceFunctions].sort(), functions.sort());
+  });
+
+  it('runs a scenario and reverts its Anvil snapshot', async () => {
+    const { graph, root } = fixture();
+    const runner = fakeRunner();
+    try {
+      await runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner });
+      assert.deepEqual(runner.calls, [
+        ['evm_snapshot', []],
+        ['evm_revert', ['0x1']],
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reverts the snapshot when the scenario fails', async () => {
+    const { graph, root } = fixture('export async function run() { throw new Error("scenario failed"); }');
+    const runner = fakeRunner();
+    try {
+      await assert.rejects(
+        () => runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner }),
+        /scenario failed/,
+      );
+      assert.deepEqual(runner.calls.at(-1), ['evm_revert', ['0x1']]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps scenario state without creating a snapshot when requested', async () => {
+    const { graph, root } = fixture();
+    const runner = fakeRunner();
+    try {
+      await runIntegrationTest(graph, deployer, 'burn', {
+        keepState: true,
+        preflight: false,
+        root,
+        runner,
+      });
+      assert.deepEqual(runner.calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -668,6 +838,21 @@ describe('group-chat seed fixtures', () => {
       assert.equal(addresses.groupChatAddress, addr(601));
       assert.equal(addresses.groupActionFactoryAddress, addr(504));
       assert.equal(addresses.tokenActionMainManagerAddress, addr(612));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('collects group action addresses without a group-chat deployment', () => {
+    const root = makeEnvFixture();
+    const graph = seedGraphFixture();
+    graph.nodes.pop();
+
+    try {
+      const addresses = collectGroupActionSeedAddresses(graph, root);
+      assert.equal(addresses.groupVerifyAddress, addr(503));
+      assert.equal(addresses.groupServiceFactoryAddress, addr(506));
+      assert.equal(addresses.groupChatAddress, undefined);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -789,7 +974,7 @@ describe('group-chat seed fixtures', () => {
       addr(1),
       'vote(address,uint256[],uint256[])',
       [addr(2), '[1]', '[1]'],
-      { label: 'account1' },
+      { label: 'account1', address: addr(9) },
       { stage: 'vote:actions' },
     );
 
@@ -915,6 +1100,26 @@ describe('group-chat seed fixtures', () => {
     assert.deepEqual(calls[2].args.slice(-4), ['--legacy', '--nonce', '8', '--async']);
   });
 
+  it('decodes structured output for JSON contract calls', () => {
+    const calls = [];
+    const runner = new CastRunner({ rpcUrl: 'http://127.0.0.1:8545', root: '/tmp', verbose: false });
+    runner.run = (args, context) => {
+      calls.push({ args, stage: context.stage });
+      return { ok: true, stdout: '["1","true"]', stderr: '', status: 0 };
+    };
+
+    assert.deepEqual(runner.callJson(addr(1), 'accountShare(address)(uint256,bool)', [addr(2)], { stage: 'share' }), ['1', 'true']);
+    assert.deepEqual(calls[0].args, [
+      'call',
+      addr(1),
+      'accountShare(address)(uint256,bool)',
+      addr(2),
+      '--json',
+      '--rpc-url',
+      'http://127.0.0.1:8545',
+    ]);
+  });
+
   it('rejects failed async transaction receipts', () => {
     const txHash = `0x${'34'.repeat(32)}`;
     const runner = {
@@ -929,6 +1134,91 @@ describe('group-chat seed fixtures', () => {
     assert.throws(
       () => waitForTransactionReceipt(runner, txHash, 'tx:receipt'),
       /transaction failed/,
+    );
+  });
+
+  it('submits and confirms an expected reverted transaction', () => {
+    const txHash = `0x${'56'.repeat(32)}`;
+    const selector = '0xa9946a81';
+    let tracedSelector = selector;
+    const calls = [];
+    const runner = {
+      run(args, context) {
+        calls.push({ method: 'run', args, stage: context.stage });
+        return { ok: true, stdout: selector, stderr: '', status: 0 };
+      },
+      call(address, signature, args, context) {
+        calls.push({ method: 'call', address, signature, args, context });
+        return { ok: false, stdout: '', stderr: `execution reverted: custom error ${selector}`, status: 1 };
+      },
+      sendAsync(address, signature, args, account, context, options) {
+        calls.push({ method: 'sendAsync', address, signature, args, account: account.label, stage: context.stage, options });
+        return txHash;
+      },
+      rpc(method, params, context) {
+        calls.push({ method, params, stage: context.stage });
+        if (method === 'eth_getTransactionReceipt') {
+          return JSON.stringify({ status: '0x0', blockNumber: '0x11', logs: [] });
+        }
+        if (method === 'debug_traceTransaction') {
+          return JSON.stringify({ failed: true, returnValue: `${tracedSelector}${'00'.repeat(32)}` });
+        }
+        return 'null';
+      },
+    };
+
+    const receipt = expectRevertedTransaction(
+      runner,
+      addr(1),
+      'claimAirdrop()',
+      [],
+      { label: 'account1', address: addr(9) },
+      { stage: 'airdrop:claim-too-early', expectedError: 'ShareNotFinalized()' },
+    );
+
+    assert.equal(receipt.status, '0x0');
+    assert.deepEqual(calls, [
+      {
+        method: 'run',
+        args: ['sig', 'ShareNotFinalized()'],
+        stage: 'airdrop:claim-too-early:error-selector',
+      },
+      {
+        method: 'call',
+        address: addr(1),
+        signature: 'claimAirdrop()',
+        args: [],
+        context: {
+          stage: 'airdrop:claim-too-early:simulate',
+          from: addr(9),
+          allowFailure: true,
+        },
+      },
+      {
+        method: 'sendAsync',
+        address: addr(1),
+        signature: 'claimAirdrop()',
+        args: [],
+        account: 'account1',
+        stage: 'airdrop:claim-too-early',
+        options: { gasLimit: 5_000_000 },
+      },
+      { method: 'anvil_mine', params: ['0x1'], stage: 'airdrop:claim-too-early:mine' },
+      { method: 'eth_getTransactionReceipt', params: [txHash], stage: 'airdrop:claim-too-early:receipt' },
+      { method: 'debug_traceTransaction', params: [txHash], stage: 'airdrop:claim-too-early:trace' },
+    ]);
+
+    tracedSelector = '0xdeadbeef';
+    assert.throws(
+      () => expectRevertedTransaction(
+        runner,
+        addr(1),
+        'claimAirdrop()',
+        [],
+        { label: 'account1', address: addr(9) },
+        { stage: 'airdrop:wrong-actual-error', expectedError: 'ShareNotFinalized()' },
+      ),
+      /actual transaction expected ShareNotFinalized/,
     );
   });
 });

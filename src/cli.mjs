@@ -21,6 +21,10 @@ import {
 import {
   seedGroupChat,
 } from './group-chat-seed.mjs';
+import {
+  integrationTargets,
+  runIntegrationTest,
+} from './integration.mjs';
 
 function readOptionValue(argv, index, option) {
   const value = argv[index + 1];
@@ -37,6 +41,7 @@ function usage() {
   node src/cli.mjs deploy [--from NODE] [--to NODE] [--only NODE] [--skip NODE[,NODE]]
   node src/cli.mjs env [--apply]
   node src/cli.mjs check [--no-repo-checks]
+  node src/cli.mjs integration TARGET [--keep-state]
   node src/cli.mjs seed group-chat
 
 示例：
@@ -48,6 +53,7 @@ function usage() {
   npm run env
   npm run env:apply
   npm run check
+  npm run integration -- burn
   npm run seed:group-chat`);
 }
 
@@ -62,7 +68,7 @@ export function parseArgs(argv) {
   };
 
   let optionStart = 1;
-  if (args.command === 'seed') {
+  if (args.command === 'seed' || args.command === 'integration') {
     args.target = argv[1]?.startsWith('-') ? undefined : argv[1];
     optionStart = args.target ? 2 : 1;
   }
@@ -85,6 +91,8 @@ export function parseArgs(argv) {
       args.apply = true;
     } else if (arg === '--no-repo-checks') {
       args.noRepoChecks = true;
+    } else if (arg === '--keep-state') {
+      args.keepState = true;
     } else if (arg === '-h' || arg === '--help') {
       args.help = true;
     } else {
@@ -132,6 +140,19 @@ async function main() {
       runRepoChecks: !args.noRepoChecks,
     });
     console.log(`\nAll checks passed. Addresses written to ${statePath}`);
+    return;
+  }
+
+  if (args.command === 'integration') {
+    const targets = integrationTargets(graph);
+    if (!args.target) {
+      throw new Error(`integration requires a target. Available: ${targets.join(', ') || '(none)'}`);
+    }
+    await runIntegrationTest(graph, deployer, args.target, {
+      keepState: args.keepState,
+      root: repoRoot,
+    });
+    console.log(`\nIntegration test passed: ${args.target}${args.keepState ? ' (state kept)' : ' (state reverted)'}`);
     return;
   }
 

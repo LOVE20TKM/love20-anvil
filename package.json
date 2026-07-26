@@ -9,6 +9,7 @@
     "env": "node src/cli.mjs env",
     "env:apply": "node src/cli.mjs env --apply",
     "seed:group-chat": "node src/cli.mjs seed group-chat",
+    "integration": "node src/cli.mjs integration",
     "check": "node src/cli.mjs check",
     "test": "node --test"
   }

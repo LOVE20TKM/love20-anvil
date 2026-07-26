@@ -1,6 +1,6 @@
 # love20-anvil
 
-用于 LOVE20 集成测试的本地 Anvil 部署编排器。
+用于 LOVE20 集成测试的本地 Anvil 部署与测试编排器。
 
 这个仓库不复制各合约仓库里的 Solidity 部署逻辑。它从相反的前提出发：本地 Anvil 部署也调用各仓库自己的部署脚本。这样一次本地部署成功，也等于回归验证了未来 `public_test` 和 `public` 部署会依赖的同一条代码路径。
 
@@ -9,7 +9,7 @@
 V1 只编排已经具备 public-test 风格部署路径的仓库和合约：
 
 ```text
-core -> periphery -> extension -> extension-lp -> group -> group-defaults -> group-delegate -> extension-group -> group-chat -> batch-transfer
+core -> periphery -> extension -> extension-lp -> group -> group-defaults -> group-delegate -> extension-group -> burn -> group-chat -> batch-transfer
 ```
 
 旧版 `chat` 仓库不在默认部署图里。
@@ -69,6 +69,23 @@ npm run env:apply
 ```bash
 npm run check
 ```
+
+运行某个代码库的真实链集成测试：
+
+```bash
+npm run deploy -- --to <node>
+npm run integration -- <node>
+```
+
+集成测试直接调用部署在 Anvil 上的合约。运行器会在测试前创建 `evm_snapshot`，并在成功或失败后回滚，保证场景可重复运行。排错时可以保留测试后的链状态：
+
+```bash
+npm run integration -- <node> --keep-state
+```
+
+每个场景的前置条件、覆盖范围和验收标准由同名文档维护：
+
+- [Burn 集成测试](integration/burn.md)
 
 初始化已部署的 `group-chat` 测试环境：
 
@@ -134,6 +151,14 @@ npm run seed:group-chat
 4. 把地址 key 加到该节点的 `outputFiles.requiredKeys`。
 5. 如果前端需要这个地址，在 `src/env.mjs` 里添加环境变量绑定。
 6. 先运行 `npm run deploy -- --to <node>` 验证该节点及其依赖；需要全图校验或生成完整前端环境时，再补齐后续节点并运行 `npm run check`、`npm run env`。
+
+## 添加集成测试
+
+1. 在 `integration/<node>.mjs` 导出 `run(context)`。
+2. 在 `integration/<node>.md` 记录前置条件、覆盖范围、失败路径和验收标准。
+3. 在部署图对应节点配置 `"integrationTest": "integration/<node>.mjs"`。
+4. 场景通过 `context.params(nodeId, file)` 读取本次部署地址，通过 `context.runner.call/send/rpc` 操作真实 Anvil 合约。
+5. 运行 `npm run integration -- <node>`。链快照和回滚由运行器统一处理，场景不用自行清理状态。
 
 ## 设计规则
 

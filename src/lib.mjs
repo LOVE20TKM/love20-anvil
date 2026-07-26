@@ -311,6 +311,19 @@ export function prepareNodeInputs(graph, node, root = repoRoot) {
       values[targetKey] = value;
     }
 
+    for (const [targetKey, sources] of Object.entries(prefill.valuesFromList || {})) {
+      values[targetKey] = sources.map((source) => {
+        const params = readNodeParams(graph, source.from, source.source, root);
+        const value = params[source.key];
+        if (!value) {
+          throw new Error(
+            `Missing upstream value ${source.from}/${source.source}:${source.key} for ${node.id}/${prefill.target}:${targetKey}`,
+          );
+        }
+        return value;
+      }).join(',');
+    }
+
     writeParamsFile(paramsPathForNode(node, prefill.target, root), values);
   }
 }
@@ -355,6 +368,9 @@ function nodeDependsOn(node, upstreamId) {
 
   for (const prefill of node.prefill || []) {
     if (Object.values(prefill.valuesFrom || {}).some((source) => source.from === upstreamId)) {
+      return true;
+    }
+    if (Object.values(prefill.valuesFromList || {}).flat().some((source) => source.from === upstreamId)) {
       return true;
     }
   }
@@ -730,36 +746,35 @@ export function deployGraph(graph, deployer, options = {}) {
   resetAnvilDeployOutputs(graph, options, root);
   for (const node of nodes) {
     console.log(`\n=== Deploy ${node.id} ===`);
-    prepareNodeInputs(graph, node, root);
-    if (node.preDeployCommand) {
-      runCommand(node.preDeployCommand, repoPathForNode(node, root), {
-        network: 'anvil',
-        ACCOUNT_ADDRESS: deployer.accountAddress,
-        KEYSTORE_ACCOUNT: deployer.keystoreAccount,
-        KEYSTORE_PASSWORD_ACCOUNT: deployer.keystoreAccount,
-        KEYSTORE_PASSWORD: '',
-        PRIVATE_KEY: deployer.privateKey,
-        ...nodeCommandEnv(node, deployer, root),
-        ...anvilFoundryEnv(node, root),
-      });
-    }
-    const commandOptions = nodeCommandOptions(node, deployer, root);
-    runCommand(node.deployCommand, repoPathForNode(node, root), {
-      network: 'anvil',
-      ACCOUNT_ADDRESS: deployer.accountAddress,
-      KEYSTORE_ACCOUNT: deployer.keystoreAccount,
-      KEYSTORE_PASSWORD_ACCOUNT: deployer.keystoreAccount,
-      KEYSTORE_PASSWORD: '',
-      PRIVATE_KEY: deployer.privateKey,
-      ...commandOptions.env,
-      ...anvilFoundryEnv(node, root),
-    }, { input: commandOptions.input });
-    syncMirroredFoundryArtifacts(node, root);
-    validateNodeOutputs(graph, node, root);
+    deployNode(graph, deployer, node, { root });
     writeState(graph, deployer, root);
   }
 
   return writeState(graph, deployer, root);
+}
+
+export function deployNode(graph, deployer, node, { root = repoRoot, prepareInputs = true } = {}) {
+  if (prepareInputs) prepareNodeInputs(graph, node, root);
+  const env = {
+    network: 'anvil',
+    ACCOUNT_ADDRESS: deployer.accountAddress,
+    KEYSTORE_ACCOUNT: deployer.keystoreAccount,
+    KEYSTORE_PASSWORD_ACCOUNT: deployer.keystoreAccount,
+    KEYSTORE_PASSWORD: '',
+    PRIVATE_KEY: deployer.privateKey,
+    ...nodeCommandEnv(node, deployer, root),
+    ...anvilFoundryEnv(node, root),
+  };
+  if (node.preDeployCommand) {
+    runCommand(node.preDeployCommand, repoPathForNode(node, root), env);
+  }
+  const commandOptions = nodeCommandOptions(node, deployer, root);
+  runCommand(node.deployCommand, repoPathForNode(node, root), {
+    ...env,
+    ...commandOptions.env,
+  }, { input: commandOptions.input });
+  syncMirroredFoundryArtifacts(node, root);
+  validateNodeOutputs(graph, node, root);
 }
 
 function lower(value) {
@@ -797,6 +812,12 @@ export function checkCrossRepoConsistency(graph, deployer, root = repoRoot) {
   const extensionGroupCenter = readNodeParams(graph, 'extension-group', 'address.extension.center.params', root);
   pushConsistencyIssue(issues, 'extension-lp centerAddress', extension.centerAddress, extensionLpCenter.centerAddress);
   pushConsistencyIssue(issues, 'extension-group centerAddress', extension.centerAddress, extensionGroupCenter.centerAddress);
+
+  const burnConfig = readParamsFile(paramsPathForNode(getNode(graph, 'burn'), 'burn.params', root));
+  pushConsistencyIssue(issues, 'burn EXTENSION_CENTER', extension.centerAddress, burnConfig.EXTENSION_CENTER);
+  pushConsistencyIssue(issues, 'burn SCOPE_TOKEN', core.firstTokenAddress, burnConfig.SCOPE_TOKEN);
+  pushConsistencyIssue(issues, 'burn COMMUNITY_TOKENS', core.firstTokenAddress, burnConfig.COMMUNITY_TOKENS);
+  pushConsistencyIssue(issues, 'burn AIRDROP_TOKEN', core.rootParentTokenAddress, burnConfig.AIRDROP_TOKEN);
 
   const group = readNodeParams(graph, 'group', 'address.group.params', root);
   const extensionGroupGroup = readNodeParams(graph, 'extension-group', 'address.group.params', root);
