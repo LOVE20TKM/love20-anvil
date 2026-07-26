@@ -92,12 +92,13 @@ export function groupChatSeedPlan(accounts = anvilAccounts) {
   ];
 }
 
-export function collectGroupActionSeedAddresses(graph, root = repoRoot) {
-  const core = readNodeParams(graph, 'core', 'address.params', root);
-  const group = readNodeParams(graph, 'group', 'address.group.params', root);
-  const groupDefaults = readNodeParams(graph, 'group-defaults', 'address.group.defaults.params', root);
-  const extension = readNodeParams(graph, 'extension', 'address.extension.center.params', root);
-  const extensionGroup = readNodeParams(graph, 'extension-group', 'address.extension.group.params', root);
+export function collectGroupActionSeedAddresses(graph, root = repoRoot, readParams) {
+  const params = readParams || ((nodeId, file) => readNodeParams(graph, nodeId, file, root));
+  const core = params('core', 'address.params');
+  const group = params('group', 'address.group.params');
+  const groupDefaults = params('group-defaults', 'address.group.defaults.params');
+  const extension = params('extension', 'address.extension.center.params');
+  const extensionGroup = params('extension-group', 'address.extension.group.params');
 
   const addresses = {
     rootParentTokenAddress: core.rootParentTokenAddress,
@@ -1699,7 +1700,7 @@ export function prepareGroupActionRound(graph, options = {}) {
     root,
     verbose: options.verbose !== false,
   });
-  const addresses = collectGroupActionSeedAddresses(graph, root);
+  const addresses = collectGroupActionSeedAddresses(graph, root, options.params);
   const roles = groupChatSeedRoles(anvilAccounts);
   const state = buildGroupChatSeedState({
     addresses,

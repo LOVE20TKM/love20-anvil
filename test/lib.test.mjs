@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   buildEnvContent,
@@ -45,6 +46,7 @@ import {
   burnInterfaceFunctions,
   clearNumericReport,
   decodeBurnEvents,
+  deployBurnFixture,
   renderNumericReport,
 } from '../integration/burn.mjs';
 import {
@@ -67,6 +69,7 @@ import {
   ensureAnvilKeystore,
   ensureSharedToolCaches,
   syncMirroredFoundryArtifacts,
+  withPreservedExternalRepositories,
   writeParamsFile,
 } from '../src/lib.mjs';
 
@@ -594,6 +597,138 @@ describe('foundry artifacts', () => {
   });
 });
 
+describe('external repository isolation', () => {
+  function isolationFixture() {
+    const root = mkdtempSync(join(tmpdir(), 'love20-anvil-isolation-test-'));
+    const graph = {
+      nodes: [{
+        id: 'core',
+        repo: 'core',
+        outputFiles: [{ path: 'address.params' }],
+      }],
+    };
+    const addressPath = join(root, 'core/script/network/anvil/address.params');
+    const original = `# user change\ncoreAddress=${addr(1)}\n`;
+    mkdirSync(dirname(addressPath), { recursive: true });
+    writeFileSync(addressPath, original);
+    writeFileSync(join(dirname(addressPath), 'user.params'), 'USER_VALUE=dirty\n');
+    mkdirSync(join(root, 'state'), { recursive: true });
+    writeFileSync(join(root, 'state/addresses.json'), `${JSON.stringify({
+      nodes: {
+        core: {
+          files: {
+            'address.params': { coreAddress: addr(2) },
+          },
+        },
+      },
+    })}\n`);
+    return { addressPath, graph, original, root };
+  }
+
+  it('hydrates saved addresses temporarily and restores existing files after success', async () => {
+    const { addressPath, graph, original, root } = isolationFixture();
+
+    try {
+      const result = await withPreservedExternalRepositories(graph, () => {
+        assert.equal(readFileSync(addressPath, 'utf8'), `coreAddress=${addr(2)}\n`);
+        writeFileSync(addressPath, `coreAddress=${addr(3)}\n`);
+        writeFileSync(join(dirname(addressPath), 'generated.params'), 'GENERATED=1\n');
+        return 'done';
+      }, root);
+
+      assert.equal(result, 'done');
+      assert.equal(readFileSync(addressPath, 'utf8'), original);
+      assert.equal(readFileSync(join(dirname(addressPath), 'user.params'), 'utf8'), 'USER_VALUE=dirty\n');
+      assert.equal(existsSync(join(dirname(addressPath), 'generated.params')), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('restores existing files when the command fails', async () => {
+    const { addressPath, graph, original, root } = isolationFixture();
+
+    try {
+      await assert.rejects(
+        () => withPreservedExternalRepositories(graph, () => {
+          writeFileSync(addressPath, `coreAddress=${addr(3)}\n`);
+          throw new Error('deploy failed');
+        }, root),
+        /deploy failed/,
+      );
+      assert.equal(readFileSync(addressPath, 'utf8'), original);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('restores external Foundry output, cache, and broadcast directories', async () => {
+    const { graph, root } = isolationFixture();
+    const repoRoot = join(root, 'core');
+    const directories = ['out', 'cache', 'broadcast'];
+
+    try {
+      for (const directory of directories) {
+        mkdirSync(join(repoRoot, directory), { recursive: true });
+        writeFileSync(join(repoRoot, directory, 'original'), `${directory}\n`);
+      }
+
+      await withPreservedExternalRepositories(graph, () => {
+        for (const directory of directories) {
+          rmSync(join(repoRoot, directory), { recursive: true, force: true });
+          mkdirSync(join(repoRoot, directory), { recursive: true });
+          writeFileSync(join(repoRoot, directory, 'generated'), 'changed\n');
+        }
+      }, root);
+
+      for (const directory of directories) {
+        assert.equal(readFileSync(join(repoRoot, directory, 'original'), 'utf8'), `${directory}\n`);
+        assert.equal(existsSync(join(repoRoot, directory, 'generated')), false);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('restores external files before exiting on termination signals', async () => {
+    for (const [terminationSignal, expectedExitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+      const { addressPath, graph, original, root } = isolationFixture();
+      const scriptPath = join(root, 'interrupt.mjs');
+      const readyPath = join(root, 'ready');
+      const libUrl = pathToFileURL(join(testDir, '../src/lib.mjs')).href;
+      writeFileSync(scriptPath, `
+        import { writeFileSync } from 'node:fs';
+        import { withPreservedExternalRepositories } from '${libUrl}';
+        const root = process.argv[2];
+        const graph = ${JSON.stringify(graph)};
+        await withPreservedExternalRepositories(graph, async () => {
+          writeFileSync('${addressPath}', 'interrupted\\n');
+          writeFileSync('${readyPath}', 'ready\\n');
+          await new Promise(() => setInterval(() => {}, 1000));
+        }, root);
+      `);
+      const child = spawn(process.execPath, [scriptPath, root], { stdio: 'ignore' });
+
+      try {
+        for (let attempt = 0; attempt < 100 && !existsSync(readyPath); attempt += 1) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+        }
+        assert.equal(existsSync(readyPath), true, `${terminationSignal} fixture did not start`);
+        const exited = once(child, 'exit');
+        child.kill(terminationSignal);
+        const [code, signal] = await exited;
+
+        assert.equal(code, expectedExitCode);
+        assert.equal(signal, null);
+        assert.equal(readFileSync(addressPath, 'utf8'), original);
+      } finally {
+        child.kill('SIGKILL');
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
 describe('CLI options', () => {
   it('parses the group-chat seed command', () => {
     assert.deepEqual(parseArgs(['seed', 'group-chat']), {
@@ -689,7 +824,15 @@ describe('CLI options', () => {
 describe('integration runner', () => {
   const deployer = { accountAddress: addr(1), privateKey: '0x01', keystoreAccount: 'anvil' };
 
-  function fixture(source = 'export async function run({ node }) { if (node.id !== "burn") throw new Error("wrong node"); }') {
+  function fixture(source = `
+    import { readFileSync } from 'node:fs';
+    export async function run({ node, params, root }) {
+      if (node.id !== 'burn') throw new Error('wrong node');
+      if (params('burn', 'address.burn.params').burnAddress !== '${addr(2)}') throw new Error('wrong state address');
+      const external = readFileSync(root + '/burn/script/network/anvil/address.burn.params', 'utf8');
+      if (external !== 'burnAddress=${addr(9)}\\n') throw new Error('external repository changed during integration');
+    }
+  `) {
     const root = mkdtempSync(join(tmpdir(), 'love20-anvil-integration-test-'));
     const graph = {
       network: { rpcUrl: 'http://127.0.0.1:8545' },
@@ -702,7 +845,17 @@ describe('integration runner', () => {
         },
       ],
     };
-    writeAnvilParams(root, 'burn', 'address.burn.params', { burnAddress: addr(2) });
+    writeAnvilParams(root, 'burn', 'address.burn.params', { burnAddress: addr(9) });
+    mkdirSync(join(root, 'state'), { recursive: true });
+    writeFileSync(join(root, 'state/addresses.json'), `${JSON.stringify({
+      nodes: {
+        burn: {
+          files: {
+            'address.burn.params': { burnAddress: addr(2) },
+          },
+        },
+      },
+    })}\n`);
     mkdirSync(join(root, 'integration'), { recursive: true });
     writeFileSync(join(root, 'integration/burn.mjs'), source);
     return { graph, root };
@@ -812,11 +965,54 @@ describe('integration runner', () => {
     }
   });
 
+  it('deploys the Burn fixture from love20-anvil artifacts only', () => {
+    const root = mkdtempSync(join(tmpdir(), 'love20-anvil-burn-fixture-'));
+    const artifactPath = join(root, '.foundry/burn/out/Burn.sol/Burn.json');
+    const calls = [];
+    const runner = {
+      rpcUrl: 'http://127.0.0.1:8545',
+      run(args) {
+        calls.push(args);
+        if (args[0] === 'abi-encode') return { stdout: '0x1234' };
+        if (args[0] === 'send') return { stdout: JSON.stringify({ contractAddress: addr(8) }) };
+        throw new Error(`Unexpected command: ${args.join(' ')}`);
+      },
+    };
+
+    try {
+      mkdirSync(dirname(artifactPath), { recursive: true });
+      writeFileSync(artifactPath, JSON.stringify({ bytecode: { object: '0x6000' } }));
+
+      const deployed = deployBurnFixture(root, deployer, runner, {
+        airdropToken: addr(3),
+        communities: [{ token: addr(4), weight: 2 }],
+        extensionCenter: addr(1),
+        factories: [addr(5)],
+        quotaMultiplier: 5,
+        roundCount: 2,
+        scopeToken: addr(2),
+        startRound: 7,
+      });
+
+      assert.equal(deployed, addr(8));
+      assert.equal(calls[0][0], 'abi-encode');
+      assert.equal(calls[1][0], 'send');
+      assert.equal(calls[1].at(-1), '0x60001234');
+      assert.equal(existsSync(join(root, 'burn')), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('runs a scenario and reverts its Anvil snapshot', async () => {
     const { graph, root } = fixture();
     const runner = fakeRunner();
     try {
       await runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner });
+      assert.equal(
+        readFileSync(join(root, 'burn/script/network/anvil/address.burn.params'), 'utf8'),
+        `burnAddress=${addr(9)}\n`,
+      );
       assert.deepEqual(runner.calls, [
         ['evm_snapshot', []],
         ['evm_revert', ['0x1']],

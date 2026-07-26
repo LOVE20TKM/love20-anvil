@@ -131,13 +131,15 @@ npm run seed:group-chat
 
 ## 输出
 
-- 各仓库的 Anvil 地址由原部署脚本写入各自的 `script/network/anvil/address*.params`。
+- 部署期间，各仓库的原部署脚本会临时写入 `script/network/anvil` 和 Foundry 的 `out`、`cache`、`broadcast`；命令成功、失败或收到 `SIGINT`/`SIGTERM` 后都会恢复部署前的目录内容。
 - 编排器会把这些输出汇总到 `state/addresses.json`。
 - Anvil 运行使用的 Foundry 产物会隔离或镜像到 `.foundry/<node>/out`。
 - 前端配置会生成到 `../interface-test/.env.anvil`，其中 ABI 路径指向这些隔离的 Anvil 产物。
 - `npm run env:apply` 替换 `../interface-test/.env.local` 前会先备份原文件。
 
 每次 `npm run deploy` 都会先清空本次部署会使其失效的 Anvil 部署输出文件和 `.foundry/<node>/out`、`.foundry/<node>/cache`，再调用原仓库部署脚本。清空的原因不是为了改变最终地址文件，而是为了让失败更早暴露：如果脚本没有重新写出必需地址，部署后的校验会看到空输出，而不是误读上一次 Anvil 留下的旧地址。
+
+编排器执行 `deploy`、`env`、`check` 和 `seed` 前，会保存其他仓库现有的 `script/network/anvil`、`out`、`cache`、`broadcast` 目录，并从 `state/addresses.json` 临时回填上次部署地址。命令结束或收到 `SIGINT`/`SIGTERM` 时恢复保存内容，因此其他仓库部署前已有的未提交参数和 Foundry 产物不会被覆盖，部署生成的新地址和产物只保留在 `love20-anvil/state`、`.foundry`。`integration` 直接读取 `state/addresses.json` 和 `.foundry` 隔离产物，运行期间也不会写入其他仓库。`env:apply` 对 `interface-test/.env.local` 的修改是显式操作，不在此恢复范围内。
 
 `--from`、`--to`、`--only`、`--skip` 会共同决定本次执行部署的节点；清理范围是本次会执行的节点，以及通过 `sync` 或 `prefill.valuesFrom` 依赖这些节点的下游节点。原因是下游地址通常绑定上游依赖，一旦上游重部署，下游旧地址即使链上仍有 code，也不再代表当前部署图。无依赖节点和显式跳过的节点会保留原地址文件。每次部署会删除并重写 `state/addresses.json`。如果本次选中节点会影响 `group-chat` seed 的输入，包括 `core`、`group`、`group-defaults`、`group-delegate`、`extension`、`extension-group`、`group-chat`，编排器还会删除 `state/group-chat-seed.json`，避免部署地址变化后复用旧 seed 状态。
 

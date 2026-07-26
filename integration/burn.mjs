@@ -13,12 +13,6 @@ import {
   prepareGroupActionRound,
   seedConfig,
 } from '../src/group-chat-seed.mjs';
-import {
-  deployNode,
-  paramsPathForNode,
-  readParamsFile,
-  writeParamsFile,
-} from '../src/lib.mjs';
 
 const WAD = 1_000_000_000_000_000_000n;
 const MAX_UINT = (1n << 256n) - 1n;
@@ -711,11 +705,11 @@ function verifyActions(runner, core, round, descriptors, stage) {
   return prepared;
 }
 
-function completeQualificationRound(graph, root, runner, core, account) {
+function completeQualificationRound(graph, root, runner, core, account, params) {
   const fixture = prepareGroupActionRound({
     ...graph,
     network: { ...graph.network, secondsPerBlock: undefined },
-  }, { root, runner });
+  }, { params, root, runner });
   const round = fixture.setup.voteRound;
 
   advanceToRound(runner, core.verify, round, 'qualification:verify-round');
@@ -840,29 +834,42 @@ function mintLpTokens(runner, core, pair, extension, account, bootstrap, label) 
   return amount;
 }
 
-function deployBurn(graph, node, root, deployer, config) {
-  const configPath = paramsPathForNode(node, 'burn.params', root);
-  const addressPath = paramsPathForNode(node, 'address.burn.params', root);
-  const originalConfig = readFileSync(configPath, 'utf8');
-  const originalAddress = readFileSync(addressPath, 'utf8');
-  try {
-    writeParamsFile(configPath, {
-      EXTENSION_CENTER: config.extensionCenter,
-      SCOPE_TOKEN: config.scopeToken,
-      AIRDROP_TOKEN: config.airdropToken,
-      COMMUNITY_TOKENS: config.communities.map((community) => community.token).join(','),
-      COMMUNITY_WEIGHTS: config.communities.map((community) => community.weight).join(','),
-      START_ROUND: String(config.startRound),
-      ROUND_COUNT: String(config.roundCount),
-      QUOTA_MULTIPLIER: String(config.quotaMultiplier),
-      SUPPORTED_EXTENSION_FACTORIES: config.factories.join(','),
-    });
-    deployNode(graph, deployer, node, { root, prepareInputs: false });
-    return readParamsFile(addressPath).burnAddress;
-  } finally {
-    writeFileSync(configPath, originalConfig);
-    writeFileSync(addressPath, originalAddress);
-  }
+export function deployBurnFixture(root, deployer, runner, config) {
+  const artifactPath = resolve(root, '.foundry/burn/out/Burn.sol/Burn.json');
+  const bytecode = JSON.parse(readFileSync(artifactPath, 'utf8')).bytecode?.object;
+  assert.ok(/^0x[0-9a-f]+$/i.test(bytecode || ''), `Missing Burn bytecode: ${artifactPath}`);
+
+  const communities = `[${config.communities
+    .map((community) => `(${community.token},${community.weight})`)
+    .join(',')}]`;
+  const factories = `[${config.factories.join(',')}]`;
+  const encoded = runner.run([
+    'abi-encode',
+    'constructor(address,address,address,(address,uint256)[],uint256,uint256,uint256,address[])',
+    config.extensionCenter,
+    config.scopeToken,
+    config.airdropToken,
+    communities,
+    String(config.startRound),
+    String(config.roundCount),
+    String(config.quotaMultiplier),
+    factories,
+  ], { stage: 'burn:encode-constructor' }).stdout;
+  const receipt = JSON.parse(runner.run([
+    'send',
+    '--private-key',
+    deployer.privateKey,
+    '--rpc-url',
+    runner.rpcUrl,
+    '--gas-price',
+    '5000000000',
+    '--legacy',
+    '--json',
+    '--create',
+    `${bytecode}${encoded.slice(2)}`,
+  ], { stage: 'burn:deploy-fixture', account: deployer.accountAddress }).stdout);
+  assert.match(receipt.contractAddress || '', /^0x[0-9a-f]{40}$/i, 'Burn fixture deployment returned no contract address');
+  return receipt.contractAddress;
 }
 
 function burnClient(runner, contract) {
@@ -907,7 +914,7 @@ function positivePortion(value) {
   return value > 100n ? value / 100n : 1n;
 }
 
-export async function run({ accounts, deployer, graph, node, params, root, runner }) {
+export async function run({ accounts, deployer, graph, params, root, runner }) {
   clearNumericReport(root);
   assertBurnInterface(root);
   const coreParams = params('core', 'address.params');
@@ -953,8 +960,8 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
   );
 
   console.log('\n=== Burn integration: child-community eligibility ===');
-  completeQualificationRound(graph, root, runner, core, accounts[1]);
-  completeQualificationRound(graph, root, runner, core, accounts[1]);
+  completeQualificationRound(graph, root, runner, core, accounts[1], params);
+  completeQualificationRound(graph, root, runner, core, accounts[1], params);
   assert.ok(uint(runner.call(core.mint, 'numOfMintGovRewardByAccount(address,address)(uint256)', [core.firstToken, accounts[1].address], { stage: 'qualification:mint-count' })) >= 2n);
 
   console.log('\n=== Burn integration: child community and receipts ===');
@@ -970,7 +977,7 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
   const fixture = prepareGroupActionRound({
     ...graph,
     network: { ...graph.network, secondsPerBlock: undefined },
-  }, { root, runner });
+  }, { params, root, runner });
   const groupRound = fixture.setup.voteRound;
   const lpRound = groupRound + 1n;
   assert.equal(uint(runner.call(core.vote, 'currentRound()(uint256)', [], { stage: 'lp:vote-round-before-submit' })), lpRound);
@@ -983,7 +990,7 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
     { token: core.firstToken, weight: 1, label: '主社区' },
     { token: child, weight: 2, label: '子社区' },
   ];
-  const burnAddress = deployBurn(graph, node, root, deployer, {
+  const burnAddress = deployBurnFixture(root, deployer, runner, {
     airdropToken: core.rootParent,
     communities,
     extensionCenter: extensionParams.centerAddress,

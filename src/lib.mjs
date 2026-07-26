@@ -4,11 +4,13 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -214,6 +216,121 @@ export function paramsPathForNode(node, paramsFile, root = repoRoot) {
   return join(networkDirForNode(node, root), paramsFile);
 }
 
+function externalMutableDirectories(graph, root) {
+  const repositories = [...new Set(graph.nodes.map((node) => repoPathForNode(node, root)))];
+  return repositories.flatMap((repository) => [
+    join(repository, 'script/network/anvil'),
+    join(repository, 'out'),
+    join(repository, 'cache'),
+    join(repository, 'broadcast'),
+  ]);
+}
+
+function snapshotExternalDirectories(graph, root) {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'love20-anvil-workspace-'));
+  const directories = externalMutableDirectories(graph, root);
+
+  try {
+    const entries = directories.map((path, index) => {
+      const snapshotPath = join(tempRoot, String(index));
+      const existed = existsSync(path);
+      if (existed) cpSync(path, snapshotPath, { recursive: true, preserveTimestamps: true });
+      return { existed, path, snapshotPath };
+    });
+    return { entries, tempRoot };
+  } catch (error) {
+    rmSync(tempRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function restoreExternalDirectories(snapshot) {
+  const errors = [];
+  for (const entry of snapshot.entries) {
+    try {
+      rmSync(entry.path, { recursive: true, force: true });
+      if (!entry.existed) continue;
+      mkdirSync(dirname(entry.path), { recursive: true });
+      cpSync(entry.snapshotPath, entry.path, { recursive: true, preserveTimestamps: true });
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      `Failed to restore external repository files; backup kept at ${snapshot.tempRoot}`,
+    );
+  }
+  rmSync(snapshot.tempRoot, { recursive: true, force: true });
+}
+
+export function hydrateAnvilFilesFromState(graph, root = repoRoot) {
+  const statePath = join(root, 'state/addresses.json');
+  if (!existsSync(statePath)) return [];
+
+  const state = loadJson(statePath);
+  const hydrated = [];
+  for (const node of graph.nodes) {
+    const files = state.nodes?.[node.id]?.files || {};
+    for (const output of node.outputFiles || []) {
+      const params = files[output.path];
+      if (!params) continue;
+      const path = paramsPathForNode(node, output.path, root);
+      writeParamsFile(path, params, { merge: false });
+      hydrated.push(path);
+    }
+  }
+  return hydrated;
+}
+
+export async function withPreservedExternalRepositories(graph, operation, root = repoRoot) {
+  const snapshot = snapshotExternalDirectories(graph, root);
+  let restored = false;
+  let result;
+  let operationError;
+  const restore = () => {
+    if (restored) return;
+    restoreExternalDirectories(snapshot);
+    restored = true;
+  };
+  const handleSignal = (signal, exitCode) => {
+    try {
+      restore();
+      process.exit(exitCode);
+    } catch (error) {
+      console.error(`Failed to restore external repositories after ${signal}: ${error.message}`);
+      process.exit(1);
+    }
+  };
+  const signalHandlers = new Map([
+    ['SIGINT', () => handleSignal('SIGINT', 130)],
+    ['SIGTERM', () => handleSignal('SIGTERM', 143)],
+  ]);
+  for (const [signal, handler] of signalHandlers) process.once(signal, handler);
+
+  try {
+    hydrateAnvilFilesFromState(graph, root);
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+
+  try {
+    restore();
+  } catch (restoreError) {
+    if (operationError) {
+      throw new AggregateError([operationError, restoreError], 'Command and Anvil file restoration both failed');
+    }
+    throw restoreError;
+  } finally {
+    for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
+  }
+
+  if (operationError) throw operationError;
+  return result;
+}
+
 function accountFileMatchesDeployer(accountFile, deployer) {
   const params = readParamsFile(accountFile);
   return (
@@ -328,29 +445,49 @@ export function prepareNodeInputs(graph, node, root = repoRoot) {
   }
 }
 
-export function validateNodeOutputs(graph, node, root = repoRoot) {
+function validateRequiredNodeOutputs(node, readOutput, label = '') {
   const errors = [];
-
   for (const output of node.outputFiles || []) {
-    const absPath = paramsPathForNode(node, output.path, root);
-    if (!existsSync(absPath)) {
-      errors.push(`${node.id}: missing ${output.path}`);
+    const params = readOutput(output);
+    const outputLabel = `${label}${output.path}`;
+    if (params === undefined) {
+      errors.push(`${node.id}: missing ${outputLabel}`);
       continue;
     }
-
-    const params = readParamsFile(absPath);
     for (const key of output.requiredKeys || []) {
       if (!params[key]) {
-        errors.push(`${node.id}: missing ${output.path}:${key}`);
+        errors.push(`${node.id}: missing ${outputLabel}:${key}`);
       } else if (!isNonZeroAddress(params[key])) {
-        errors.push(`${node.id}: ${output.path}:${key} is not a non-zero address: ${params[key]}`);
+        errors.push(`${node.id}: ${outputLabel}:${key} is not a non-zero address: ${params[key]}`);
       }
     }
   }
+  if (errors.length > 0) throw new Error(errors.join('\n'));
+}
 
-  if (errors.length > 0) {
-    throw new Error(errors.join('\n'));
+export function validateNodeOutputs(graph, node, root = repoRoot) {
+  validateRequiredNodeOutputs(node, (output) => {
+    const path = paramsPathForNode(node, output.path, root);
+    return existsSync(path) ? readParamsFile(path) : undefined;
+  });
+}
+
+export function readStateNodeParams(graph, nodeId, paramsFile, root = repoRoot) {
+  getNode(graph, nodeId);
+  const statePath = join(root, 'state/addresses.json');
+  if (!existsSync(statePath)) {
+    throw new Error(`Missing deployment state: ${statePath}; run npm run deploy first.`);
   }
+  const state = loadJson(statePath);
+  return state.nodes?.[nodeId]?.files?.[paramsFile] || {};
+}
+
+export function validateStateNodeOutputs(graph, node, root = repoRoot) {
+  validateRequiredNodeOutputs(
+    node,
+    (output) => readStateNodeParams(graph, node.id, output.path, root),
+    'state ',
+  );
 }
 
 export function validateAllOutputs(graph, root = repoRoot) {

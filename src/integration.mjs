@@ -5,9 +5,9 @@ import { anvilAccounts, CastRunner } from './anvil.mjs';
 import {
   getNode,
   preflight,
-  readNodeParams,
+  readStateNodeParams,
   repoRoot,
-  validateNodeOutputs,
+  validateStateNodeOutputs,
 } from './lib.mjs';
 
 function rpcValue(output) {
@@ -38,7 +38,7 @@ export async function runIntegrationTest(graph, deployer, target, options = {}) 
   if (options.preflight !== false) {
     preflight(graph, deployer, { requireRpc: true, root });
   }
-  validateNodeOutputs(graph, node, root);
+  validateStateNodeOutputs(graph, node, root);
 
   const snapshot = options.keepState
     ? undefined
@@ -56,7 +56,7 @@ export async function runIntegrationTest(graph, deployer, target, options = {}) 
       deployer,
       graph,
       node,
-      params: (nodeId, file) => readNodeParams(graph, nodeId, file, root),
+      params: (nodeId, file) => readStateNodeParams(graph, nodeId, file, root),
       root,
       runner,
     });

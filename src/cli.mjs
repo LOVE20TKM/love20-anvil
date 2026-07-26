@@ -12,6 +12,7 @@ import {
   preflight,
   repoRoot,
   selectNodes,
+  withPreservedExternalRepositories,
   writeState,
 } from './lib.mjs';
 import {
@@ -116,15 +117,23 @@ async function main() {
   if (args.command === 'deploy') {
     const selected = selectNodes(graph, args).map((node) => node.id);
     console.log(`Deploy nodes: ${selected.join(' -> ') || '(none)'}`);
-    const statePath = deployGraph(graph, deployer, args);
+    const statePath = await withPreservedExternalRepositories(
+      graph,
+      () => deployGraph(graph, deployer, args),
+      repoRoot,
+    );
     console.log(`\nAddresses written to ${statePath}`);
     return;
   }
 
   if (args.command === 'env') {
-    ensureAnvilFiles(graph, deployer, repoRoot);
-    const envPath = writeEnvFile(graph, repoRoot);
-    const statePath = writeState(graph, deployer, repoRoot);
+    const { envPath, statePath } = await withPreservedExternalRepositories(graph, () => {
+      ensureAnvilFiles(graph, deployer, repoRoot);
+      return {
+        envPath: writeEnvFile(graph, repoRoot),
+        statePath: writeState(graph, deployer, repoRoot),
+      };
+    }, repoRoot);
     console.log(`Generated ${envPath}`);
     console.log(`Addresses written to ${statePath}`);
     if (args.apply) {
@@ -135,10 +144,14 @@ async function main() {
   }
 
   if (args.command === 'check') {
-    const statePath = checkGraph(graph, deployer, {
-      root: repoRoot,
-      runRepoChecks: !args.noRepoChecks,
-    });
+    const statePath = await withPreservedExternalRepositories(
+      graph,
+      () => checkGraph(graph, deployer, {
+        root: repoRoot,
+        runRepoChecks: !args.noRepoChecks,
+      }),
+      repoRoot,
+    );
     console.log(`\nAll checks passed. Addresses written to ${statePath}`);
     return;
   }
@@ -163,9 +176,11 @@ async function main() {
     if (args.target !== 'group-chat') {
       throw new Error(`Unknown seed target: ${args.target}`);
     }
-    ensureAnvilFiles(graph, deployer, repoRoot);
-    preflight(graph, deployer, { requireRpc: true, root: repoRoot });
-    const statePath = await seedGroupChat(graph, deployer, { root: repoRoot });
+    const statePath = await withPreservedExternalRepositories(graph, async () => {
+      ensureAnvilFiles(graph, deployer, repoRoot);
+      preflight(graph, deployer, { requireRpc: true, root: repoRoot });
+      return seedGroupChat(graph, deployer, { root: repoRoot });
+    }, repoRoot);
     console.log(`\nGroupChat seed state written to ${statePath}`);
     return;
   }
