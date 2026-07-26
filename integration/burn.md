@@ -14,6 +14,8 @@ npm run integration -- burn
 
 测试默认通过 Anvil 快照隔离状态，成功或失败后都会回滚。排错时使用 `npm run integration -- burn --keep-state` 保留现场。
 
+每次运行开始时会先删除旧报告；仅当本轮全部校验通过后，才生成 [`state/logs/burn-numeric-report.md`](../state/logs/burn-numeric-report.md)。报告逐项并列展示独立理论模型、Burn 公共查询接口和链上事件重建结果；任意三方数值不一致都会直接使集成测试失败。
+
 ## 前置状态
 
 - 使用 Anvil 默认账户完成两轮真实治理流程。
@@ -30,8 +32,13 @@ npm run integration -- burn
 - 覆盖基础行动、LP V1、LP V2、链群行动、链群服务五类行动来源。
 - 覆盖 LP 扩展的 Factory 创建、行动提交、投票、注册、加入、验证、领取奖励和销毁。
 - 校验基础行动和四类扩展在 ExtensionCenter 中的 Factory 映射。
-- 校验 `SLTokenLocked`、`STTokenLocked`、`GovRewardTokenBurned`、`ActionRewardTokenBurned`、`AirdropClaimed` 事件。
+- 校验 `CommunityConfigFrozen`、`SupportedExtensionFactoryFrozen`、`SLTokenLocked`、`STTokenLocked`、`GovRewardTokenBurned`、`ActionRewardTokenBurned`、`AirdropClaimed` 全部 7 类事件。
+- 通过 ABI 结构化解码校验每个 indexed topic 和 data 字段，不只检查 `topic0` 或事件数量。
+- 校验操作数量、得分系数、操作得分、地址与社区全周期累计数量和累计得分。
+- 校验构造期社区权重、`scoreBase`、部署时供应量、单轮激励以及全部受支持 Factory。
+- 校验双地址空投事件中的份额、实际领取量、领取顺序和领取后的剩余份额。
 - 所有结构化返回通过 Cast JSON 输出解析，避免终端科学计数注释影响断言。
+- 数值报告覆盖部署权重与 `scoreBase`、各社区和地址的四类累计数量/得分、轮次 multiplier、双地址空投份额、领取数量及剩余份额/余额。
 
 ## 失败与原子性
 

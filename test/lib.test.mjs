@@ -41,7 +41,11 @@ import {
   runIntegrationTest,
 } from '../src/integration.mjs';
 import {
+  burnEventSchemas,
   burnInterfaceFunctions,
+  clearNumericReport,
+  decodeBurnEvents,
+  renderNumericReport,
 } from '../integration/burn.mjs';
 import {
   anvilKeystoreHome,
@@ -731,6 +735,81 @@ describe('integration runner', () => {
 
     assert.equal(functions.length, 33);
     assert.deepEqual([...burnInterfaceFunctions].sort(), functions.sort());
+  });
+
+  it('keeps every Burn event schema aligned with IBurnEvents', () => {
+    const source = readFileSync(join(testDir, '../../burn/src/interface/IBurn.sol'), 'utf8');
+    const eventsSource = source.slice(source.indexOf('interface IBurnEvents'), source.indexOf('interface IBurnErrors'));
+    const schemas = [...eventsSource.matchAll(/\bevent\s+(\w+)\s*\(([\s\S]*?)\);/g)].map((match) => ({
+      name: match[1],
+      fields: match[2].split(',').map((parameter) => {
+        const parts = parameter.trim().split(/\s+/);
+        return {
+          name: parts.at(-1),
+          type: parts[0],
+          indexed: parts.includes('indexed'),
+        };
+      }),
+    }));
+
+    assert.equal(schemas.length, 7);
+    assert.deepEqual(burnEventSchemas, schemas);
+  });
+
+  it('decodes every indexed and data field from a Burn event log', () => {
+    const burnAddress = '0x2222222222222222222222222222222222222222';
+    const account = '0x1111111111111111111111111111111111111111';
+    const word = (value) => BigInt(value).toString(16).padStart(64, '0');
+    const receipt = {
+      raw: {
+        logs: [{
+          address: burnAddress,
+          topics: [
+            '0xfedf0b5680f1b4c33012be9dc9002760386b67e06ee715d4e62ded585fb312ee',
+            `0x${account.slice(2).padStart(64, '0')}`,
+          ],
+          data: `0x${word(7)}${word(11)}${word(13)}`,
+        }],
+      },
+    };
+
+    assert.deepEqual(
+      decodeBurnEvents(
+        new CastRunner({ rpcUrl: 'http://unused', verbose: false }),
+        receipt,
+        burnAddress,
+        'airdrop',
+        'event:decode-test',
+      ),
+      [{ account, share: 7n, amount: 11n, remainingShare: 13n }],
+    );
+  });
+
+  it('renders three-source numeric rows and rejects any mismatch', () => {
+    const metadata = { burnAddress: addr(2), startRound: 7n, endRound: 8n };
+    const rows = [{ section: 'Airdrop', metric: 'account1 claimed amount', theory: 11n, contract: 11n, event: 11n }];
+
+    const report = renderNumericReport(metadata, rows);
+    assert.match(report, /\| Airdrop \| account1 claimed amount \| 11 \| 11 \| 11 \| PASS \|/);
+    assert.throws(
+      () => renderNumericReport(metadata, [{ ...rows[0], event: 10n }]),
+      /account1 claimed amount: theory=11 contract=11 event=10/,
+    );
+  });
+
+  it('clears a stale Burn numeric report before a new run', () => {
+    const root = mkdtempSync(join(tmpdir(), 'love20-anvil-report-'));
+    const reportPath = join(root, 'state/logs/burn-numeric-report.md');
+    try {
+      mkdirSync(dirname(reportPath), { recursive: true });
+      writeFileSync(reportPath, 'stale');
+
+      clearNumericReport(root);
+
+      assert.equal(existsSync(reportPath), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('runs a scenario and reverts its Anvil snapshot', async () => {

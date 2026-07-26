@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
@@ -24,13 +24,128 @@ const WAD = 1_000_000_000_000_000_000n;
 const MAX_UINT = (1n << 256n) - 1n;
 const CHILD_SYMBOL = 'BURN20';
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-const BURN_EVENTS = {
-  sl: 'SLTokenLocked(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256)',
-  st: 'STTokenLocked(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256)',
-  gov: 'GovRewardTokenBurned(address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256)',
-  action: 'ActionRewardTokenBurned(address,address,uint256,uint256,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256)',
-  airdrop: 'AirdropClaimed(address,uint256,uint256,uint256)',
+const BURN_INDEXED_FIELDS = [['tokenAddress', 'address'], ['account', 'address'], ['round', 'uint256']];
+const BURN_TOTAL_FIELDS = [
+  ['amount', 'uint256'],
+  ['scoreMultiplier', 'uint256'],
+  ['score', 'uint256'],
+  ['accountTotalAmount', 'uint256'],
+  ['accountTotalScore', 'uint256'],
+  ['communityTotalAmount', 'uint256'],
+  ['communityTotalScore', 'uint256'],
+];
+const BURN_EVENT_SPECS = {
+  community: {
+    name: 'CommunityConfigFrozen',
+    indexed: [['tokenAddress', 'address']],
+    data: [
+      ['weight', 'uint256'],
+      ['scoreBase', 'uint256'],
+      ['totalSupply', 'uint256'],
+      ['deploymentRoundReward', 'uint256'],
+    ],
+  },
+  factory: {
+    name: 'SupportedExtensionFactoryFrozen',
+    indexed: [['factory', 'address']],
+    data: [],
+  },
+  sl: {
+    name: 'SLTokenLocked',
+    indexed: BURN_INDEXED_FIELDS,
+    data: BURN_TOTAL_FIELDS,
+  },
+  st: {
+    name: 'STTokenLocked',
+    indexed: BURN_INDEXED_FIELDS,
+    data: BURN_TOTAL_FIELDS,
+  },
+  gov: {
+    name: 'GovRewardTokenBurned',
+    indexed: BURN_INDEXED_FIELDS,
+    data: BURN_TOTAL_FIELDS,
+  },
+  action: {
+    name: 'ActionRewardTokenBurned',
+    indexed: BURN_INDEXED_FIELDS,
+    data: [
+      ['actionId', 'uint256'],
+      ['extensionAddress', 'address'],
+      ['amount', 'uint256'],
+      ['scoreMultiplier', 'uint256'],
+      ['score', 'uint256'],
+      ['accountTotalAmount', 'uint256'],
+      ['accountTotalScore', 'uint256'],
+      ['communityTotalAmount', 'uint256'],
+      ['communityTotalScore', 'uint256'],
+    ],
+  },
+  airdrop: {
+    name: 'AirdropClaimed',
+    indexed: [['account', 'address']],
+    data: [['share', 'uint256'], ['amount', 'uint256'], ['remainingShare', 'uint256']],
+  },
 };
+const BURN_CATEGORIES = [
+  { eventName: 'sl', label: 'SL 锁仓' },
+  { eventName: 'st', label: 'ST 锁仓' },
+  { eventName: 'gov', label: '治理奖励销毁' },
+  { eventName: 'action', label: '行动奖励销毁' },
+];
+
+function burnEventSignature(eventName) {
+  const spec = BURN_EVENT_SPECS[eventName];
+  return `${spec.name}(${[...spec.indexed, ...spec.data].map(([, type]) => type).join(',')})`;
+}
+
+export const burnEventSchemas = Object.keys(BURN_EVENT_SPECS).map((eventName) => {
+  const spec = BURN_EVENT_SPECS[eventName];
+  return {
+    name: spec.name,
+    fields: [
+      ...spec.indexed.map(([name, type]) => ({ name, type, indexed: true })),
+      ...spec.data.map(([name, type]) => ({ name, type, indexed: false })),
+    ],
+  };
+});
+
+export function renderNumericReport(metadata, rows) {
+  for (const row of rows) {
+    assert.equal(
+      row.contract,
+      row.theory,
+      `${row.metric}: theory=${row.theory} contract=${row.contract} event=${row.event}`,
+    );
+    assert.equal(
+      row.event,
+      row.theory,
+      `${row.metric}: theory=${row.theory} contract=${row.contract} event=${row.event}`,
+    );
+  }
+
+  return [
+    '# Burn 数值集成测试报告',
+    '',
+    `- Burn: \`${metadata.burnAddress}\``,
+    `- 测试轮次: ${metadata.startRound} - ${metadata.endRound}`,
+    `- 指标数: ${rows.length}`,
+    '- 数值单位: 合约原始整数（WAD = 1e18）',
+    ...(metadata.entities || []).map((entity) => `- ${entity.label}: \`${entity.address}\``),
+    '',
+    '| 分类 | 指标 | 理论数值 | 合约数值 | 事件数值 | 结果 |',
+    '| --- | --- | ---: | ---: | ---: | --- |',
+    ...rows.map((row) => `| ${row.section} | ${row.metric} | ${row.theory} | ${row.contract} | ${row.event} | PASS |`),
+    '',
+  ].join('\n');
+}
+
+function numericReportPath(root) {
+  return resolve(root, 'state/logs/burn-numeric-report.md');
+}
+
+export function clearNumericReport(root) {
+  rmSync(numericReportPath(root), { force: true });
+}
 
 export const burnInterfaceFunctions = [
   'extensionCenter',
@@ -182,18 +297,335 @@ function sendBatch(runner, transactions, stage) {
   return minePendingTransactions(runner, pending, stage);
 }
 
-function eventTopics(runner) {
-  return Object.fromEntries(Object.entries(BURN_EVENTS).map(([name, signature]) => [
+function expectedEvent(eventName, values) {
+  const fields = BURN_EVENT_SPECS[eventName];
+  return Object.fromEntries([...fields.indexed, ...fields.data].map(([name, type]) => [
     name,
-    lower(runner.run(['sig-event', signature], { stage: `burn:event-topic:${name}` }).stdout),
+    type === 'address' ? lower(values[name]) : BigInt(values[name]),
   ]));
 }
 
-function assertBurnEvent(receipt, burnAddress, topic, expectedCount, stage) {
-  const count = (receipt.raw.logs || []).filter((log) => (
-    lower(log.address) === lower(burnAddress) && lower(log.topics?.[0]) === topic
-  )).length;
-  assert.equal(count, expectedCount, `${stage}: expected ${expectedCount} Burn event(s), got ${count}`);
+function decodeAbiFields(runner, fields, data, stage) {
+  if (fields.length === 0) return {};
+  const signature = `event()(${fields.map(([, type]) => type).join(',')})`;
+  const output = runner.run(['abi-decode', '--json', signature, data], { stage }).stdout;
+  const values = JSON.parse(output);
+  assert.equal(values.length, fields.length, `${stage}: decoded field count mismatch`);
+  return Object.fromEntries(fields.map(([name, type], index) => [
+    name,
+    type === 'address' ? lower(values[index]) : BigInt(values[index]),
+  ]));
+}
+
+export function decodeBurnEvents(runner, receipt, burnAddress, eventName, stage) {
+  const fields = BURN_EVENT_SPECS[eventName];
+  assert.ok(fields, `${stage}: unknown Burn event ${eventName}`);
+  const topic = lower(runner.run(['sig-event', burnEventSignature(eventName)], { stage: `${stage}:topic` }).stdout);
+  return (receipt.raw.logs || [])
+    .filter((log) => lower(log.address) === lower(burnAddress) && lower(log.topics?.[0]) === topic)
+    .map((log, index) => {
+      assert.equal(log.topics.length, fields.indexed.length + 1, `${stage}:${index}: indexed field count mismatch`);
+      const indexedData = `0x${log.topics.slice(1).map((value) => value.replace(/^0x/, '')).join('')}`;
+      return {
+        ...decodeAbiFields(runner, fields.indexed, indexedData, `${stage}:${index}:indexed`),
+        ...decodeAbiFields(runner, fields.data, log.data, `${stage}:${index}:data`),
+      };
+    });
+}
+
+function assertBurnEvents(runner, receipt, burnAddress, eventName, expected, stage) {
+  assert.deepEqual(
+    decodeBurnEvents(runner, receipt, burnAddress, eventName, stage),
+    expected.map((values) => expectedEvent(eventName, values)),
+    `${stage}: unexpected ${burnEventSignature(eventName)} event data`,
+  );
+}
+
+function burnEventModel() {
+  const roundTotals = new Map();
+  const accountTotals = new Map();
+  const communityTotals = new Map();
+
+  function read(map, key) {
+    return map.get(key) || { amount: 0n, score: 0n };
+  }
+
+  return {
+    record(eventName, values) {
+      const token = lower(values.tokenAddress);
+      const account = lower(values.account);
+      const roundKey = `${account}:${token}:${values.round}:${eventName}`;
+      const accountKey = `${account}:${token}:${eventName}`;
+      const communityKey = `${token}:${eventName}`;
+      const roundBefore = read(roundTotals, roundKey);
+      const roundAmount = roundBefore.amount + values.amount;
+      const roundScore = (roundAmount * values.scoreMultiplier) / WAD;
+      const score = roundScore - roundBefore.score;
+      const accountTotal = read(accountTotals, accountKey);
+      const communityTotal = read(communityTotals, communityKey);
+      const nextAccountTotal = { amount: accountTotal.amount + values.amount, score: accountTotal.score + score };
+      const nextCommunityTotal = { amount: communityTotal.amount + values.amount, score: communityTotal.score + score };
+
+      roundTotals.set(roundKey, { amount: roundAmount, score: roundScore });
+      accountTotals.set(accountKey, nextAccountTotal);
+      communityTotals.set(communityKey, nextCommunityTotal);
+      return {
+        ...values,
+        score,
+        accountTotalAmount: nextAccountTotal.amount,
+        accountTotalScore: nextAccountTotal.score,
+        communityTotalAmount: nextCommunityTotal.amount,
+        communityTotalScore: nextCommunityTotal.score,
+      };
+    },
+    accountTotal(account, token, eventName) {
+      return read(accountTotals, `${lower(account)}:${lower(token)}:${eventName}`);
+    },
+    communityTotal(token, eventName) {
+      return read(communityTotals, `${lower(token)}:${eventName}`);
+    },
+    accountEntries() {
+      return [...accountTotals].map(([key, value]) => {
+        const [account, token, eventName] = key.split(':');
+        return { account, token, eventName, ...value };
+      });
+    },
+    communityEntries() {
+      return [...communityTotals].map(([key, value]) => {
+        const [token, eventName] = key.split(':');
+        return { token, eventName, ...value };
+      });
+    },
+  };
+}
+
+function powWad(base, exponent) {
+  let result = WAD;
+  while (exponent > 0n) {
+    if ((exponent & 1n) !== 0n) result = (result * base) / WAD;
+    exponent >>= 1n;
+    if (exponent > 0n) base = (base * base) / WAD;
+  }
+  return result;
+}
+
+function burnStats(value) {
+  const values = tupleUints(value);
+  assert.equal(values.length, BURN_CATEGORIES.length * 2, `Expected BurnStats, got: ${value}`);
+  return Object.fromEntries(BURN_CATEGORIES.map(({ eventName }, index) => [eventName, {
+    amount: values[index * 2],
+    score: values[index * 2 + 1],
+  }]));
+}
+
+function aggregateBurnEventStats(runner, receipt, burnAddress) {
+  const accountTotals = new Map();
+  const communityTotals = new Map();
+  const multipliers = new Map();
+  const add = (map, key, event) => {
+    const current = map.get(key) || { amount: 0n, score: 0n };
+    map.set(key, { amount: current.amount + event.amount, score: current.score + event.score });
+  };
+
+  for (const { eventName } of BURN_CATEGORIES) {
+    for (const event of decodeBurnEvents(runner, receipt, burnAddress, eventName, `report:event:${eventName}`)) {
+      add(accountTotals, `${event.account}:${event.tokenAddress}:${eventName}`, event);
+      add(communityTotals, `${event.tokenAddress}:${eventName}`, event);
+      const multiplierKey = `${event.tokenAddress}:${event.round}`;
+      const previous = multipliers.get(multiplierKey);
+      if (previous !== undefined) assert.equal(event.scoreMultiplier, previous, `Event multiplier changed for ${multiplierKey}`);
+      multipliers.set(multiplierKey, event.scoreMultiplier);
+    }
+  }
+
+  return {
+    account(account, token, eventName) {
+      return accountTotals.get(`${lower(account)}:${lower(token)}:${eventName}`) || { amount: 0n, score: 0n };
+    },
+    community(token, eventName) {
+      return communityTotals.get(`${lower(token)}:${eventName}`) || { amount: 0n, score: 0n };
+    },
+    multiplier(token, round) {
+      const value = multipliers.get(`${lower(token)}:${round}`);
+      assert.notEqual(value, undefined, `No Burn event multiplier for ${token}:${round}`);
+      return value;
+    },
+  };
+}
+
+function theoryAccountShare(theory, communities, account) {
+  const active = communities.filter(({ token }) => (
+    BURN_CATEGORIES.some(({ eventName }) => theory.communityTotal(token, eventName).score > 0n)
+  ));
+  const activeWeight = active.reduce((sum, community) => sum + BigInt(community.weight), 0n);
+
+  return active.reduce((total, community) => {
+    const categories = BURN_CATEGORIES.filter(({ eventName }) => theory.communityTotal(community.token, eventName).score > 0n);
+    const communityShare = (BigInt(community.weight) * WAD) / activeWeight;
+    const categoryShare = communityShare / BigInt(categories.length);
+    return total + categories.reduce((share, { eventName }) => {
+      const accountScore = theory.accountTotal(account, community.token, eventName).score;
+      const communityScore = theory.communityTotal(community.token, eventName).score;
+      return share + (categoryShare * accountScore) / communityScore;
+    }, 0n);
+  }, 0n);
+}
+
+function writeNumericReport({
+  root,
+  runner,
+  burn,
+  burnAddress,
+  airdropToken,
+  startRound,
+  endRound,
+  communities,
+  factories,
+  theory,
+  theoreticalCommunities,
+  multiplierChecks,
+  claimants,
+  airdropPool,
+  accountLabels,
+}) {
+  const logs = contractLogs(runner, burnAddress, 'report:logs');
+  const eventStats = aggregateBurnEventStats(runner, logs, burnAddress);
+  const communityEvents = new Map(
+    decodeBurnEvents(runner, logs, burnAddress, 'community', 'report:community-events')
+      .map((event) => [event.tokenAddress, event]),
+  );
+  const factoryEvents = decodeBurnEvents(runner, logs, burnAddress, 'factory', 'report:factory-events');
+  const airdropEvents = decodeBurnEvents(runner, logs, burnAddress, 'airdrop', 'report:airdrop-events');
+  const rows = [];
+  const add = (section, metric, theoryValue, contractValue, eventValue) => rows.push({
+    section,
+    metric,
+    theory: BigInt(theoryValue),
+    contract: BigInt(contractValue),
+    event: BigInt(eventValue),
+  });
+
+  add(
+    '部署配置',
+    '社区总权重',
+    communities.reduce((sum, community) => sum + BigInt(community.weight), 0n),
+    uint(burn.call('totalCommunityWeight()(uint256)', [], 'report:total-community-weight')),
+    [...communityEvents.values()].reduce((sum, event) => sum + event.weight, 0n),
+  );
+  add(
+    '部署配置',
+    '扩展 Factory 数量',
+    factories.length,
+    addresses(burn.call('supportedExtensionFactories()(address[])', [], 'report:factories')).length,
+    factoryEvents.length,
+  );
+  for (const community of theoreticalCommunities) {
+    const event = communityEvents.get(lower(community.tokenAddress));
+    assert.ok(event, `Missing CommunityConfigFrozen for ${community.tokenAddress}`);
+    add(
+      '部署配置',
+      `${community.label}权重`,
+      community.weight,
+      uint(burn.call('communityWeight(address)(uint256)', [community.tokenAddress], `report:${community.label}:weight`)),
+      event.weight,
+    );
+    add(
+      '部署配置',
+      `${community.label} scoreBase`,
+      community.scoreBase,
+      uint(burn.call('scoreBase(address)(uint256)', [community.tokenAddress], `report:${community.label}:score-base`)),
+      event.scoreBase,
+    );
+  }
+
+  for (const check of multiplierChecks) {
+    add(
+      '得分系数',
+      `${check.label}第 ${check.round} 轮 multiplier`,
+      check.theory,
+      uint(burn.call('scoreMultiplier(address,uint256)(uint256)', [check.token, check.round], `report:${check.label}:multiplier`)),
+      eventStats.multiplier(check.token, check.round),
+    );
+  }
+
+  for (const community of communities) {
+    const contract = burnStats(burn.callJson(
+      'communityBurnStats(address)(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))',
+      [community.token],
+      `report:${community.label}:community-stats`,
+    )[0]);
+    for (const category of BURN_CATEGORIES) {
+      const expected = theory.communityTotal(community.token, category.eventName);
+      const emitted = eventStats.community(community.token, category.eventName);
+      add('社区累计', `${community.label}${category.label}数量`, expected.amount, contract[category.eventName].amount, emitted.amount);
+      add('社区累计', `${community.label}${category.label}得分`, expected.score, contract[category.eventName].score, emitted.score);
+    }
+  }
+
+  for (const entry of theory.accountEntries()) {
+    const community = communities.find(({ token }) => lower(token) === entry.token);
+    const category = BURN_CATEGORIES.find(({ eventName }) => eventName === entry.eventName);
+    const contract = burnStats(burn.callJson(
+      'accountBurnStats(address,address)(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))',
+      [entry.account, entry.token],
+      `report:account:${entry.account}:${entry.eventName}`,
+    )[0])[entry.eventName];
+    const emitted = eventStats.account(entry.account, entry.token, entry.eventName);
+    const accountLabel = accountLabels.get(entry.account) || entry.account.slice(0, 8);
+    add('地址累计', `${accountLabel}/${community.label}/${category.label}数量`, entry.amount, contract.amount, emitted.amount);
+    add('地址累计', `${accountLabel}/${community.label}/${category.label}得分`, entry.score, contract.score, emitted.score);
+  }
+
+  assert.equal(airdropEvents.length, claimants.length, 'Unexpected AirdropClaimed event count');
+  let theoreticalPool = airdropPool;
+  let theoreticalRemainingShare = WAD;
+  for (const [index, claimant] of claimants.entries()) {
+    const share = theoryAccountShare(theory, communities, claimant.account);
+    const amount = (theoreticalPool * share) / theoreticalRemainingShare;
+    const state = airdropState(burn.callJson(
+      'accountAirdropState(address)((bool,bool,bool,uint256,uint256,uint256))',
+      [claimant.account],
+      `report:airdrop:${claimant.label}`,
+    ));
+    const event = airdropEvents[index];
+    assert.equal(event.account, lower(claimant.account), `Unexpected airdrop claimant at index ${index}`);
+    add('空投', `${claimant.label}份额`, share, state.share, event.share);
+    add('空投', `${claimant.label}领取数量`, amount, state.claimedAmount, event.amount);
+    theoreticalPool -= amount;
+    theoreticalRemainingShare -= share;
+  }
+  add(
+    '空投',
+    '领取后剩余份额',
+    theoreticalRemainingShare,
+    uint(burn.call('remainingAirdropShare()(uint256)', [], 'report:remaining-share')),
+    airdropEvents.at(-1).remainingShare,
+  );
+  add(
+    '空投',
+    '领取后剩余代币',
+    theoreticalPool,
+    balanceOf(runner, airdropToken, burnAddress, 'report:remaining-pool'),
+    airdropPool - airdropEvents.reduce((sum, event) => sum + event.amount, 0n),
+  );
+
+  const reportPath = numericReportPath(root);
+  mkdirSync(resolve(root, 'state/logs'), { recursive: true });
+  writeFileSync(reportPath, renderNumericReport({
+    burnAddress,
+    startRound,
+    endRound,
+    entities: [
+      ...communities.map((community) => ({ label: community.label, address: community.token })),
+      ...claimants.map((claimant) => ({ label: claimant.label, address: claimant.account })),
+    ],
+  }, rows));
+  return { path: reportPath, rows };
+}
+
+function contractLogs(runner, contract, stage) {
+  const filter = JSON.stringify({ address: contract, fromBlock: '0x0', toBlock: 'latest' });
+  return { raw: { logs: JSON.parse(runner.rpc('eth_getLogs', [filter], { stage })) } };
 }
 
 function assertExtensionRegistration(runner, center, token, actionId, expectedExtension, expectedFactory, stage) {
@@ -476,6 +908,7 @@ function positivePortion(value) {
 }
 
 export async function run({ accounts, deployer, graph, node, params, root, runner }) {
+  clearNumericReport(root);
   assertBurnInterface(root);
   const coreParams = params('core', 'address.params');
   const extensionParams = params('extension', 'address.extension.center.params');
@@ -546,9 +979,13 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
   voteAction(runner, core, accounts[1], lpV1ActionId, lpRound, 'lp-v1-action:vote');
   voteAction(runner, core, accounts[2], lpV2ActionId, lpRound, 'lp-v2-action:vote');
 
+  const communities = [
+    { token: core.firstToken, weight: 1, label: '主社区' },
+    { token: child, weight: 2, label: '子社区' },
+  ];
   const burnAddress = deployBurn(graph, node, root, deployer, {
     airdropToken: core.rootParent,
-    communities: [{ token: core.firstToken, weight: 1 }, { token: child, weight: 2 }],
+    communities,
     extensionCenter: extensionParams.centerAddress,
     factories,
     quotaMultiplier: 5,
@@ -558,7 +995,7 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
   });
   console.log(`  burn: fixture deployed at ${burnAddress}`);
   const burn = burnClient(runner, burnAddress);
-  const topics = eventTopics(runner);
+  const theory = burnEventModel();
 
   assert.equal(lower(address(burn.call('extensionCenter()(address)', [], 'burn:extension-center'))), lower(extensionParams.centerAddress));
   assert.equal(lower(address(burn.call('scopeTokenAddress()(address)', [], 'burn:scope-token'))), lower(core.firstToken));
@@ -577,6 +1014,35 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
   assert.deepEqual(addresses(burn.call('supportedExtensionFactories()(address[])', [], 'burn:factories')).map(lower), factories.map(lower));
   for (const factory of factories) assert.ok(bool(burn.call('isSupportedExtensionFactory(address)(bool)', [factory], `burn:factory:${factory}`)));
   assert.equal(uint(burn.call('scoreMultiplier(address,uint256)(uint256)', [core.firstToken, groupRound], 'burn:score-multiplier')) > 0n, true);
+
+  const deploymentLogs = contractLogs(runner, burnAddress, 'event:deployment-logs');
+  const rewardRatePerThousand = uint(runner.call(core.mint, 'ROUND_REWARD_GOV_PER_THOUSAND()(uint256)', [], { stage: 'event:gov-rate' }))
+    + uint(runner.call(core.mint, 'ROUND_REWARD_ACTION_PER_THOUSAND()(uint256)', [], { stage: 'event:action-rate' }));
+  const theoreticalCommunities = communities.map(({ token, weight, label }) => {
+    const totalSupply = uint(runner.call(token, 'totalSupply()(uint256)', [], { stage: `event:community:${token}:total-supply` }));
+    const maxSupply = uint(runner.call(token, 'maxSupply()(uint256)', [], { stage: `event:community:${token}:max-supply` }));
+    const deploymentRoundReward = ((maxSupply - totalSupply) * rewardRatePerThousand) / 1000n;
+    return {
+      tokenAddress: token,
+      label,
+      weight,
+      scoreBase: WAD + (deploymentRoundReward * WAD) / totalSupply,
+      totalSupply,
+      deploymentRoundReward,
+    };
+  });
+  assertBurnEvents(runner, deploymentLogs, burnAddress, 'community', theoreticalCommunities, 'event:community-config');
+  assertBurnEvents(
+    runner,
+    deploymentLogs,
+    burnAddress,
+    'factory',
+    factories.map((factory) => ({ factory })),
+    'event:supported-factories',
+  );
+  const scoreBaseByToken = new Map(theoreticalCommunities.map((community) => [lower(community.tokenAddress), community.scoreBase]));
+  const theoreticalMultiplier = (token, round) => powWad(scoreBaseByToken.get(lower(token)), lpRound - round);
+  const multiplierChecks = [];
 
   runner.txValue(core.rootParent, 'deposit()', WAD, [], accounts[0], { stage: 'airdrop:fund-deployer' });
   pauseMining(runner, 'burn:manual-mining');
@@ -663,14 +1129,87 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
       ...lockRequests.map((request) => burn.transaction(request.signature, [request.token, groupRound, request.amount], request.account, `burn:${request.signature}:${request.account.label}`)),
     ], 'burn:group-round');
 
-    assertBurnEvent(groupBurnReceipts[0], burnAddress, topics.gov, 1, 'event:gov-reward');
-    for (let i = 1; i <= 3; i += 1) {
-      assertBurnEvent(groupBurnReceipts[i], burnAddress, topics.action, 1, `event:group-action:${i}`);
+    const firstMultiplier = theoreticalMultiplier(core.firstToken, groupRound);
+    const childMultiplier = theoreticalMultiplier(child, groupRound);
+    assert.equal(uint(burn.call('scoreMultiplier(address,uint256)(uint256)', [core.firstToken, groupRound], 'event:first-multiplier')), firstMultiplier);
+    assert.equal(uint(burn.call('scoreMultiplier(address,uint256)(uint256)', [child, groupRound], 'event:child-multiplier')), childMultiplier);
+    multiplierChecks.push(
+      { label: '主社区', token: core.firstToken, round: groupRound, theory: firstMultiplier },
+      { label: '子社区', token: child, round: groupRound, theory: childMultiplier },
+    );
+    const rewardEventChecks = [
+      {
+        eventName: 'gov',
+        receipt: groupBurnReceipts[0],
+        values: { tokenAddress: core.firstToken, account: accounts[1].address, round: groupRound, amount: 1n, scoreMultiplier: firstMultiplier },
+      },
+      {
+        eventName: 'action',
+        receipt: groupBurnReceipts[1],
+        values: {
+          tokenAddress: core.firstToken,
+          account: baseClaimant.address,
+          round: groupRound,
+          actionId: fixture.setup.baseActionId,
+          extensionAddress: ZERO_ADDRESS,
+          amount: 1n,
+          scoreMultiplier: firstMultiplier,
+        },
+      },
+      {
+        eventName: 'action',
+        receipt: groupBurnReceipts[2],
+        values: {
+          tokenAddress: core.firstToken,
+          account: fixture.roles.groupActionParticipant.address,
+          round: groupRound,
+          actionId: fixture.setup.groupActionId,
+          extensionAddress: fixture.setup.groupActionExtension,
+          amount: 1n,
+          scoreMultiplier: firstMultiplier,
+        },
+      },
+      {
+        eventName: 'action',
+        receipt: groupBurnReceipts[3],
+        values: {
+          tokenAddress: core.firstToken,
+          account: fixture.roles.serviceProvider.address,
+          round: groupRound,
+          actionId: fixture.setup.serviceActionId,
+          extensionAddress: fixture.setup.groupServiceExtension,
+          amount: 1n,
+          scoreMultiplier: firstMultiplier,
+        },
+      },
+    ];
+    for (const [index, check] of rewardEventChecks.entries()) {
+      assertBurnEvents(
+        runner,
+        check.receipt,
+        burnAddress,
+        check.eventName,
+        [theory.record(check.eventName, check.values)],
+        `event:group-reward:${index}`,
+      );
     }
-    assertBurnEvent(groupBurnReceipts[4], burnAddress, topics.sl, 1, 'event:first-sl');
-    assertBurnEvent(groupBurnReceipts[5], burnAddress, topics.st, 1, 'event:first-st');
-    assertBurnEvent(groupBurnReceipts[6], burnAddress, topics.sl, 1, 'event:child-sl');
-    assertBurnEvent(groupBurnReceipts[7], burnAddress, topics.st, 1, 'event:child-st');
+    for (const [index, request] of lockRequests.entries()) {
+      const eventName = request.signature.startsWith('lockSLToken') ? 'sl' : 'st';
+      assertBurnEvents(
+        runner,
+        groupBurnReceipts[index + 4],
+        burnAddress,
+        eventName,
+        [theory.record(eventName, {
+          tokenAddress: request.token,
+          account: request.account.address,
+          round: groupRound,
+          amount: request.amount,
+          scoreMultiplier: lower(request.token) === lower(core.firstToken) ? firstMultiplier : childMultiplier,
+        })],
+        `event:receipt-lock:${index}`,
+      );
+    }
 
     const govState = onlyTuple(burn.callJson('govRewardBurnState(address,address,uint256)((uint256,uint256,bool,uint256,uint256,uint256))', [accounts[1].address, core.firstToken, groupRound], 'burn:gov-state'));
     assert.equal(govState[2], 'true');
@@ -719,7 +1258,29 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
       accounts[4],
       'burn:lp-v1-v2-action-reward',
     )], 'lp-round:burn');
-    assertBurnEvent(lpBurnReceipts[0], burnAddress, topics.action, 2, 'event:lp-v1-v2');
+    const lpMultiplier = theoreticalMultiplier(core.firstToken, lpRound);
+    assert.equal(uint(burn.call('scoreMultiplier(address,uint256)(uint256)', [core.firstToken, lpRound], 'event:lp-multiplier')), lpMultiplier);
+    multiplierChecks.push({ label: '主社区', token: core.firstToken, round: lpRound, theory: lpMultiplier });
+    assertBurnEvents(runner, lpBurnReceipts[0], burnAddress, 'action', [
+      theory.record('action', {
+        tokenAddress: core.firstToken,
+        account: accounts[4].address,
+        round: lpRound,
+        actionId: lpV1ActionId,
+        extensionAddress: lpV1.extension,
+        amount: 1n,
+        scoreMultiplier: lpMultiplier,
+      }),
+      theory.record('action', {
+        tokenAddress: core.firstToken,
+        account: accounts[4].address,
+        round: lpRound,
+        actionId: lpV2ActionId,
+        extensionAddress: lpV2.extension,
+        amount: 1n,
+        scoreMultiplier: lpMultiplier,
+      }),
+    ], 'event:lp-v1-v2');
     const lpActionIds = actionStateIds(burn.callJson('actionRewardBurnStates(address,address,uint256)((uint256,address,(uint256,uint256,bool,uint256,uint256,uint256))[])', [accounts[4].address, core.firstToken, lpRound], 'burn:lp-action-states'));
     assert.ok(lpActionIds.includes(lpV1ActionId) && lpActionIds.includes(lpV2ActionId));
 
@@ -765,11 +1326,22 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
       burn.transaction('claimAirdrop()', [], accounts[1], 'airdrop:claim-account1'),
       burn.transaction('claimAirdrop()', [], accounts[2], 'airdrop:claim-account2'),
     ], 'airdrop:claims');
-    assertBurnEvent(claimReceipts[0], burnAddress, topics.airdrop, 1, 'event:airdrop-account1');
-    assertBurnEvent(claimReceipts[1], burnAddress, topics.airdrop, 1, 'event:airdrop-account2');
     const claimed1 = balanceOf(runner, core.rootParent, accounts[1].address, 'airdrop:account1-after') - before1;
     const claimed2 = balanceOf(runner, core.rootParent, accounts[2].address, 'airdrop:account2-after') - before2;
     const remainingPool = balanceOf(runner, core.rootParent, burnAddress, 'airdrop:pool-after-claims');
+    assert.ok(BigInt(claimReceipts[0].raw.transactionIndex) < BigInt(claimReceipts[1].raw.transactionIndex), 'airdrop claims mined out of submission order');
+    assertBurnEvents(runner, claimReceipts[0], burnAddress, 'airdrop', [{
+      account: accounts[1].address,
+      share: account1Share,
+      amount: claimed1,
+      remainingShare: WAD - account1Share,
+    }], 'event:airdrop-account1');
+    assertBurnEvents(runner, claimReceipts[1], burnAddress, 'airdrop', [{
+      account: accounts[2].address,
+      share: account2Share,
+      amount: claimed2,
+      remainingShare: WAD - account1Share - account2Share,
+    }], 'event:airdrop-account2');
     assert.ok(claimed1 > 0n && claimed2 > 0n);
     assert.equal(airdropPool, claimed1 + claimed2 + remainingPool);
     assert.equal(uint(burn.call('remainingAirdropShare()(uint256)', [], 'airdrop:remaining-share-after')), WAD - account1Share - account2Share);
@@ -787,6 +1359,28 @@ export async function run({ accounts, deployer, graph, node, params, root, runne
       expectedError: 'AirdropAlreadyClaimed()',
     });
     assert.equal(balanceOf(runner, core.rootParent, accounts[1].address, 'airdrop:account1-after-rejected-claim'), before1 + claimed1);
+
+    const numericReport = writeNumericReport({
+      root,
+      runner,
+      burn,
+      burnAddress,
+      airdropToken: core.rootParent,
+      startRound: groupRound,
+      endRound: lpRound,
+      communities,
+      factories,
+      theory,
+      theoreticalCommunities,
+      multiplierChecks,
+      claimants: [
+        { account: accounts[1].address, label: accounts[1].label },
+        { account: accounts[2].address, label: accounts[2].label },
+      ],
+      airdropPool,
+      accountLabels: new Map(accounts.map((account) => [lower(account.address), account.label])),
+    });
+    console.log(`  burn: numeric report passed ${numericReport.rows.length} metrics -> ${numericReport.path}`);
   } finally {
     resumeMining(runner, graph.network.secondsPerBlock, 'burn:restore-mining');
   }
