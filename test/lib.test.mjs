@@ -46,7 +46,7 @@ import {
   burnInterfaceFunctions,
   clearNumericReport,
   decodeBurnEvents,
-  deployBurnFixture,
+  deployIntegrationBurn,
   renderNumericReport,
 } from '../integration/burn.mjs';
 import {
@@ -739,10 +739,10 @@ describe('CLI options', () => {
   });
 
   it('parses an integration target and state option', () => {
-    assert.deepEqual(parseArgs(['integration', 'burn', '--keep-state']), {
+    assert.deepEqual(parseArgs(['integration', 'burn', '--revert-state']), {
       command: 'integration',
       target: 'burn',
-      keepState: true,
+      revertState: true,
       skip: [],
     });
   });
@@ -939,10 +939,12 @@ describe('integration runner', () => {
   });
 
   it('renders three-source numeric rows and rejects any mismatch', () => {
-    const metadata = { burnAddress: addr(2), startRound: 7n, endRound: 8n };
+    const metadata = { burnAddress: addr(2), startRound: 32n, endRound: 33n };
     const rows = [{ section: 'Airdrop', metric: 'account1 claimed amount', theory: 11n, contract: 11n, event: 11n }];
 
     const report = renderNumericReport(metadata, rows);
+    assert.ok(report.includes(`集成测试 Burn: \`${addr(2)}\``));
+    assert.match(report, /明确配置轮次: 32 - 33/);
     assert.match(report, /\| Airdrop \| account1 claimed amount \| 11 \| 11 \| 11 \| PASS \|/);
     assert.throws(
       () => renderNumericReport(metadata, [{ ...rows[0], event: 10n }]),
@@ -965,9 +967,10 @@ describe('integration runner', () => {
     }
   });
 
-  it('deploys the Burn fixture from love20-anvil artifacts only', () => {
+  it('deploys the integration Burn with an explicit start round', () => {
     const root = mkdtempSync(join(tmpdir(), 'love20-anvil-burn-fixture-'));
     const artifactPath = join(root, '.foundry/burn/out/Burn.sol/Burn.json');
+    const builds = [];
     const calls = [];
     const runner = {
       rpcUrl: 'http://127.0.0.1:8545',
@@ -983,7 +986,7 @@ describe('integration runner', () => {
       mkdirSync(dirname(artifactPath), { recursive: true });
       writeFileSync(artifactPath, JSON.stringify({ bytecode: { object: '0x6000' } }));
 
-      const deployed = deployBurnFixture(root, deployer, runner, {
+      const deployed = deployIntegrationBurn(root, deployer, runner, {
         airdropToken: addr(3),
         communities: [{ token: addr(4), weight: 2 }],
         extensionCenter: addr(1),
@@ -992,19 +995,37 @@ describe('integration runner', () => {
         roundCount: 2,
         scopeToken: addr(2),
         startRound: 7,
+      }, (...args) => {
+        builds.push(args);
+        return { status: 0, stderr: '', stdout: '' };
       });
 
       assert.equal(deployed, addr(8));
+      assert.equal(builds.length, 1);
+      assert.deepEqual(builds[0][1].slice(0, 2), ['build', '--out']);
       assert.equal(calls[0][0], 'abi-encode');
       assert.equal(calls[1][0], 'send');
       assert.equal(calls[1].at(-1), '0x60001234');
       assert.equal(existsSync(join(root, 'burn')), false);
+      assert.throws(
+        () => deployIntegrationBurn(root, deployer, runner, {
+          airdropToken: addr(3),
+          communities: [{ token: addr(4), weight: 2 }],
+          extensionCenter: addr(1),
+          factories: [addr(5)],
+          quotaMultiplier: 5,
+          roundCount: 2,
+          scopeToken: addr(2),
+          startRound: 'current',
+        }),
+        /startRound must be explicit/,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('runs a scenario and reverts its Anvil snapshot', async () => {
+  it('runs a scenario and keeps its Anvil state by default', async () => {
     const { graph, root } = fixture();
     const runner = fakeRunner();
     try {
@@ -1013,6 +1034,52 @@ describe('integration runner', () => {
         readFileSync(join(root, 'burn/script/network/anvil/address.burn.params'), 'utf8'),
         `burnAddress=${addr(9)}\n`,
       );
+      assert.deepEqual(runner.calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('lets a scenario deploy its own target contract', async () => {
+    const { graph, root } = fixture('export async function run() {}');
+    const runner = fakeRunner();
+    graph.nodes[0].integrationOwnsDeployment = true;
+    const statePath = join(root, 'state/addresses.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    state.nodes.burn.files = {};
+    writeFileSync(statePath, `${JSON.stringify(state)}\n`);
+    try {
+      await runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner });
+      assert.deepEqual(runner.calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps scenario state when the scenario fails by default', async () => {
+    const { graph, root } = fixture('export async function run() { throw new Error("scenario failed"); }');
+    const runner = fakeRunner();
+    try {
+      await assert.rejects(
+        () => runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner }),
+        /scenario failed/,
+      );
+      assert.deepEqual(runner.calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reverts scenario state when requested', async () => {
+    const { graph, root } = fixture();
+    const runner = fakeRunner();
+    try {
+      await runIntegrationTest(graph, deployer, 'burn', {
+        preflight: false,
+        revertState: true,
+        root,
+        runner,
+      });
       assert.deepEqual(runner.calls, [
         ['evm_snapshot', []],
         ['evm_revert', ['0x1']],
@@ -1022,31 +1089,23 @@ describe('integration runner', () => {
     }
   });
 
-  it('reverts the snapshot when the scenario fails', async () => {
+  it('reverts scenario state when requested after a failure', async () => {
     const { graph, root } = fixture('export async function run() { throw new Error("scenario failed"); }');
     const runner = fakeRunner();
     try {
       await assert.rejects(
-        () => runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner }),
+        () => runIntegrationTest(graph, deployer, 'burn', {
+          preflight: false,
+          revertState: true,
+          root,
+          runner,
+        }),
         /scenario failed/,
       );
-      assert.deepEqual(runner.calls.at(-1), ['evm_revert', ['0x1']]);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('keeps scenario state without creating a snapshot when requested', async () => {
-    const { graph, root } = fixture();
-    const runner = fakeRunner();
-    try {
-      await runIntegrationTest(graph, deployer, 'burn', {
-        keepState: true,
-        preflight: false,
-        root,
-        runner,
-      });
-      assert.deepEqual(runner.calls, []);
+      assert.deepEqual(runner.calls, [
+        ['evm_snapshot', []],
+        ['evm_revert', ['0x1']],
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

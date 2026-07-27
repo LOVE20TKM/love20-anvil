@@ -38,11 +38,11 @@ export async function runIntegrationTest(graph, deployer, target, options = {}) 
   if (options.preflight !== false) {
     preflight(graph, deployer, { requireRpc: true, root });
   }
-  validateStateNodeOutputs(graph, node, root);
+  if (!node.integrationOwnsDeployment) validateStateNodeOutputs(graph, node, root);
 
-  const snapshot = options.keepState
-    ? undefined
-    : rpcValue(runner.rpc('evm_snapshot', [], { stage: 'integration:snapshot' }));
+  const snapshot = options.revertState
+    ? rpcValue(runner.rpc('evm_snapshot', [], { stage: 'integration:snapshot' }))
+    : undefined;
   let testError;
   try {
     const moduleUrl = pathToFileURL(resolve(root, node.integrationTest));

@@ -224,7 +224,7 @@
           "target": "burn.params",
           "values": {
             "COMMUNITY_WEIGHTS": "1",
-            "START_ROUND": "current",
+            "START_ROUND": "6",
             "ROUND_COUNT": "3",
             "QUOTA_MULTIPLIER": "5"
           },
@@ -284,7 +284,8 @@
           ]
         }
       ],
-      "integrationTest": "integration/burn.mjs"
+      "integrationTest": "integration/burn.mjs",
+      "integrationOwnsDeployment": true
     },
     {
       "id": "group-chat",

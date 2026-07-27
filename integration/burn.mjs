@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -120,8 +121,8 @@ export function renderNumericReport(metadata, rows) {
   return [
     '# Burn 数值集成测试报告',
     '',
-    `- Burn: \`${metadata.burnAddress}\``,
-    `- 测试轮次: ${metadata.startRound} - ${metadata.endRound}`,
+    `- 集成测试 Burn: \`${metadata.burnAddress}\``,
+    `- 明确配置轮次: ${metadata.startRound} - ${metadata.endRound}`,
     `- 指标数: ${rows.length}`,
     '- 数值单位: 合约原始整数（WAD = 1e18）',
     ...(metadata.entities || []).map((entity) => `- ${entity.label}: \`${entity.address}\``),
@@ -834,8 +835,17 @@ function mintLpTokens(runner, core, pair, extension, account, bootstrap, label) 
   return amount;
 }
 
-export function deployBurnFixture(root, deployer, runner, config) {
+export function deployIntegrationBurn(root, deployer, runner, config, build = spawnSync) {
   const artifactPath = resolve(root, '.foundry/burn/out/Burn.sol/Burn.json');
+  assert.match(String(config.startRound), /^\d+$/, 'Integration Burn startRound must be explicit');
+  const result = build('forge', [
+    'build',
+    '--out', resolve(root, '.foundry/burn/out'),
+    '--cache-path', resolve(root, '.foundry/burn/cache'),
+  ], { cwd: resolve(root, '../burn'), encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`Failed to build integration Burn: ${result.stderr.trim() || result.stdout.trim()}`);
+  }
   const bytecode = JSON.parse(readFileSync(artifactPath, 'utf8')).bytecode?.object;
   assert.ok(/^0x[0-9a-f]+$/i.test(bytecode || ''), `Missing Burn bytecode: ${artifactPath}`);
 
@@ -922,7 +932,6 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   const lpParams = params('extension-lp', 'address.extension.lp.params');
   const lpV2Params = params('extension-lp', 'address.extension.lp.v2.params');
   const groupParams = params('extension-group', 'address.extension.group.params');
-  const deployedBurn = params('burn', 'address.burn.params').burnAddress;
   const factories = [
     lpParams.lpFactoryAddress,
     lpV2Params.lpFactoryV2Address,
@@ -943,7 +952,6 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
 
   for (const [name, contract] of Object.entries({
     ...core,
-    deployedBurn,
     extensionCenter: extensionParams.centerAddress,
     lpFactory: lpParams.lpFactoryAddress,
     lpFactoryV2: lpV2Params.lpFactoryV2Address,
@@ -953,12 +961,6 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     const code = runner.run(['code', contract, '--rpc-url', runner.rpcUrl], { stage: `code:${name}` }).stdout;
     assert.notEqual(code, '0x', `${name} has no deployed code`);
   }
-  assert.deepEqual(
-    addresses(runner.call(deployedBurn, 'supportedExtensionFactories()(address[])', [], { stage: 'deployed-burn:factories' })).map(lower),
-    factories.map(lower),
-    'Deployment graph Burn does not include all supported extension factories',
-  );
-
   console.log('\n=== Burn integration: child-community eligibility ===');
   completeQualificationRound(graph, root, runner, core, accounts[1], params);
   completeQualificationRound(graph, root, runner, core, accounts[1], params);
@@ -980,6 +982,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   }, { params, root, runner });
   const groupRound = fixture.setup.voteRound;
   const lpRound = groupRound + 1n;
+  const endRound = groupRound + 2n;
   assert.equal(uint(runner.call(core.vote, 'currentRound()(uint256)', [], { stage: 'lp:vote-round-before-submit' })), lpRound);
   const lpV1ActionId = actionIdAfterSubmit(runner, core, accounts[1], lpV1.extension, 'lp-v1-action');
   const lpV2ActionId = actionIdAfterSubmit(runner, core, accounts[3], lpV2.extension, 'lp-v2-action');
@@ -990,13 +993,14 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     { token: core.firstToken, weight: 1, label: '主社区' },
     { token: child, weight: 2, label: '子社区' },
   ];
-  const burnAddress = deployBurnFixture(root, deployer, runner, {
+  console.log(`  burn: deploying integration contract with explicit startRound=${groupRound}`);
+  const burnAddress = deployIntegrationBurn(root, deployer, runner, {
     airdropToken: core.rootParent,
     communities,
     extensionCenter: extensionParams.centerAddress,
     factories,
     quotaMultiplier: 5,
-    roundCount: 2,
+    roundCount: 3,
     scopeToken: core.firstToken,
     startRound: groupRound,
   });
@@ -1008,8 +1012,8 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   assert.equal(lower(address(burn.call('scopeTokenAddress()(address)', [], 'burn:scope-token'))), lower(core.firstToken));
   assert.equal(lower(address(burn.call('airdropTokenAddress()(address)', [], 'burn:airdrop-token'))), lower(core.rootParent));
   assert.equal(uint(burn.call('startRound()(uint256)', [], 'burn:start-round')), groupRound);
-  assert.equal(uint(burn.call('roundCount()(uint256)', [], 'burn:round-count')), 2n);
-  assert.equal(uint(burn.call('endRound()(uint256)', [], 'burn:end-round')), lpRound);
+  assert.equal(uint(burn.call('roundCount()(uint256)', [], 'burn:round-count')), 3n);
+  assert.equal(uint(burn.call('endRound()(uint256)', [], 'burn:end-round')), endRound);
   assert.equal(uint(burn.call('quotaMultiplier()(uint256)', [], 'burn:quota-multiplier')), 5n);
   assert.equal(uint(burn.call('totalCommunityWeight()(uint256)', [], 'burn:total-community-weight')), 3n);
   assert.equal(uint(burn.call('remainingAirdropShare()(uint256)', [], 'burn:remaining-share')), WAD);
@@ -1048,7 +1052,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     'event:supported-factories',
   );
   const scoreBaseByToken = new Map(theoreticalCommunities.map((community) => [lower(community.tokenAddress), community.scoreBase]));
-  const theoreticalMultiplier = (token, round) => powWad(scoreBaseByToken.get(lower(token)), lpRound - round);
+  const theoreticalMultiplier = (token, round) => powWad(scoreBaseByToken.get(lower(token)), endRound - round);
   const multiplierChecks = [];
 
   runner.txValue(core.rootParent, 'deposit()', WAD, [], accounts[0], { stage: 'airdrop:fund-deployer' });
@@ -1291,8 +1295,30 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     const lpActionIds = actionStateIds(burn.callJson('actionRewardBurnStates(address,address,uint256)((uint256,address,(uint256,uint256,bool,uint256,uint256,uint256))[])', [accounts[4].address, core.firstToken, lpRound], 'burn:lp-action-states'));
     assert.ok(lpActionIds.includes(lpV1ActionId) && lpActionIds.includes(lpV2ActionId));
 
+    console.log('\n=== Burn integration: end round receipt lock ===');
+    advanceToRound(runner, core.verify, endRound + 1n, 'end-round:open');
+    assert.ok(bool(burn.call('isRoundOpen(uint256)(bool)', [endRound], 'burn:end-round-open')));
+    const endRoundSlAmount = positivePortion(balanceOf(runner, firstSl, accounts[1].address, 'end-round:sl-balance'));
+    const endRoundReceipts = sendBatch(runner, [
+      { address: firstSl, signature: 'approve(address,uint256)', args: [burnAddress, endRoundSlAmount], account: accounts[1], stage: 'end-round:approve-sl' },
+      burn.transaction('lockSLToken(address,uint256,uint256)', [core.firstToken, endRound, endRoundSlAmount], accounts[1], 'end-round:lock-sl'),
+    ], 'end-round:lock');
+    const endRoundMultiplier = theoreticalMultiplier(core.firstToken, endRound);
+    assert.equal(endRoundMultiplier, WAD);
+    assert.equal(uint(burn.call('scoreMultiplier(address,uint256)(uint256)', [core.firstToken, endRound], 'end-round:multiplier')), endRoundMultiplier);
+    multiplierChecks.push({ label: '主社区', token: core.firstToken, round: endRound, theory: endRoundMultiplier });
+    assertBurnEvents(runner, endRoundReceipts[1], burnAddress, 'sl', [
+      theory.record('sl', {
+        tokenAddress: core.firstToken,
+        account: accounts[1].address,
+        round: endRound,
+        amount: endRoundSlAmount,
+        scoreMultiplier: endRoundMultiplier,
+      }),
+    ], 'event:end-round-sl');
+
     console.log('\n=== Burn integration: finalized shares and airdrop ===');
-    advanceToRound(runner, core.verify, lpRound + 2n, 'burn:finalize');
+    advanceToRound(runner, core.verify, endRound + 2n, 'burn:finalize');
     const [account1ShareText, account1Finalized] = burn.callJson('accountShare(address)(uint256,bool)', [accounts[1].address], 'burn:account1-share');
     const [account2ShareText, account2Finalized] = burn.callJson('accountShare(address)(uint256,bool)', [accounts[2].address], 'burn:account2-share');
     const account1Share = BigInt(account1ShareText);
@@ -1308,7 +1334,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     assert.ok(participants.includes(lower(accounts[1].address)) && participants.includes(lower(accounts[2].address)));
     assert.ok(bool(burn.call('isParticipant(address)(bool)', [accounts[2].address], 'burn:is-participant')));
 
-    const expiredWrite = burn.transaction('lockSLToken(address,uint256,uint256)', [core.firstToken, lpRound, 1], accounts[1], 'burn:write-after-end');
+    const expiredWrite = burn.transaction('lockSLToken(address,uint256,uint256)', [core.firstToken, endRound, 1], accounts[1], 'burn:write-after-end');
     expectRevertedTransaction(runner, expiredWrite.address, expiredWrite.signature, expiredWrite.args, expiredWrite.account, {
       stage: expiredWrite.stage,
       expectedError: 'RoundNotOpen(uint256,uint256)',
@@ -1374,7 +1400,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
       burnAddress,
       airdropToken: core.rootParent,
       startRound: groupRound,
-      endRound: lpRound,
+      endRound,
       communities,
       factories,
       theory,

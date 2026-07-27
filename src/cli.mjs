@@ -42,7 +42,7 @@ function usage() {
   node src/cli.mjs deploy [--from NODE] [--to NODE] [--only NODE] [--skip NODE[,NODE]]
   node src/cli.mjs env [--apply]
   node src/cli.mjs check [--no-repo-checks]
-  node src/cli.mjs integration TARGET [--keep-state]
+  node src/cli.mjs integration TARGET [--revert-state]
   node src/cli.mjs seed group-chat
 
 示例：
@@ -92,8 +92,8 @@ export function parseArgs(argv) {
       args.apply = true;
     } else if (arg === '--no-repo-checks') {
       args.noRepoChecks = true;
-    } else if (arg === '--keep-state') {
-      args.keepState = true;
+    } else if (arg === '--revert-state') {
+      args.revertState = true;
     } else if (arg === '-h' || arg === '--help') {
       args.help = true;
     } else {
@@ -162,10 +162,10 @@ async function main() {
       throw new Error(`integration requires a target. Available: ${targets.join(', ') || '(none)'}`);
     }
     await runIntegrationTest(graph, deployer, args.target, {
-      keepState: args.keepState,
+      revertState: args.revertState,
       root: repoRoot,
     });
-    console.log(`\nIntegration test passed: ${args.target}${args.keepState ? ' (state kept)' : ' (state reverted)'}`);
+    console.log(`\nIntegration test passed: ${args.target}${args.revertState ? ' (state reverted)' : ' (state kept)'}`);
     return;
   }
 

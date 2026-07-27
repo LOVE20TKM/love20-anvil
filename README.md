@@ -77,10 +77,12 @@ npm run deploy -- --to <node>
 npm run integration -- <node>
 ```
 
-集成测试直接调用部署在 Anvil 上的合约。运行器会在测试前创建 `evm_snapshot`，并在成功或失败后回滚，保证场景可重复运行。排错时可以保留测试后的链状态：
+若场景自行部署被测合约，则先部署到其上游节点；具体命令以同名集成测试文档为准。
+
+集成测试直接调用部署在 Anvil 上的合约，成功或失败后默认保留链上现场，方便继续查询和排错。再次完整运行前应启动 fresh Anvil 并重新部署；需要隔离运行并在结束后回滚时使用：
 
 ```bash
-npm run integration -- <node> --keep-state
+npm run integration -- <node> --revert-state
 ```
 
 每个场景的前置条件、覆盖范围和验收标准由同名文档维护：
@@ -160,7 +162,7 @@ npm run seed:group-chat
 2. 在 `integration/<node>.md` 记录前置条件、覆盖范围、失败路径和验收标准。
 3. 在部署图对应节点配置 `"integrationTest": "integration/<node>.mjs"`。
 4. 场景通过 `context.params(nodeId, file)` 读取本次部署地址，通过 `context.runner.call/send/rpc` 操作真实 Anvil 合约。
-5. 运行 `npm run integration -- <node>`。链快照和回滚由运行器统一处理，场景不用自行清理状态。
+5. 运行 `npm run integration -- <node>`。测试后默认保留链状态；需要隔离运行时添加 `--revert-state`，快照和回滚由运行器统一处理。
 
 ## 设计规则
 

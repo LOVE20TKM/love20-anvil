@@ -4,25 +4,25 @@
 
 ## 运行
 
-启动 fresh Anvil 并部署到 Burn：
+启动 fresh Anvil 并部署 Burn 的上游依赖；Burn 由集成场景在前置状态完成后自行部署：
 
 ```bash
 npm run anvil:start
-npm run deploy -- --to burn
+npm run deploy -- --to extension-group
 npm run integration -- burn
 ```
 
-测试默认通过 Anvil 快照隔离状态，成功或失败后都会回滚。排错时使用 `npm run integration -- burn --keep-state` 保留现场。
+测试成功或失败后默认保留 Anvil 现场。再次运行前需重启 fresh Anvil 并重新部署；需要隔离运行并在结束后回滚时使用 `npm run integration -- burn --revert-state`。
 
-每次运行开始时会先删除旧报告；仅当本轮全部校验通过后，才生成 [`state/logs/burn-numeric-report.md`](../state/logs/burn-numeric-report.md)。报告逐项并列展示独立理论模型、Burn 公共查询接口和链上事件重建结果；任意三方数值不一致都会直接使集成测试失败。
+每次运行开始时会先删除旧报告；仅当本轮全部校验通过后，才生成 [`state/logs/burn-numeric-report.md`](../state/logs/burn-numeric-report.md)。报告中的 Burn 就是集成场景在完成治理和子社区前置状态后部署的唯一被测实例；数值表逐项并列展示独立理论模型、该 Burn 公共查询接口和该 Burn 事件重建结果，任意三方数值不一致都会直接使集成测试失败。
 
 ## 前置状态
 
 - 使用 Anvil 默认账户完成两轮真实治理流程。
 - 创建首个 LOVE20 社区及一个直接子社区。
 - 为多个账户建立 SL、ST、治理奖励和行动奖励状态。
-- 校验部署图产出的 Burn 已配置 LP V1、LP V2、链群行动、链群服务四个 Factory。
-- 通过 Burn 仓库的 `one_click_deploy.sh` 部署双社区实例并执行仓库部署检查，空投代币使用真实 ERC20。
+- 子社区完成发射、测试行动完成投票后，集成脚本取该明确治理轮次作为 `startRound`；每次都从当前 `../burn` 源码执行增量编译，并使用隔离产物部署双社区实例，避免复用陈旧字节码。
+- 部署后核对该 Burn 的 `startRound/roundCount/endRound`、全部构造参数，以及 LP V1、LP V2、链群行动、链群服务四个 Factory；空投代币使用真实 ERC20。
 
 ## 覆盖范围
 
@@ -35,6 +35,7 @@ npm run integration -- burn
 - 校验 `CommunityConfigFrozen`、`SupportedExtensionFactoryFrozen`、`SLTokenLocked`、`STTokenLocked`、`GovRewardTokenBurned`、`ActionRewardTokenBurned`、`AirdropClaimed` 全部 7 类事件。
 - 通过 ABI 结构化解码校验每个 indexed topic 和 data 字段，不只检查 `topic0` 或事件数量。
 - 校验操作数量、得分系数、操作得分、地址与社区全周期累计数量和累计得分。
+- 连续覆盖三个销毁轮次，以真实事件校验开始、中间、最后一轮的 `scoreBase²`、`scoreBase¹`、`1` 三档得分系数。
 - 校验构造期社区权重、`scoreBase`、部署时供应量、单轮激励以及全部受支持 Factory。
 - 校验双地址空投事件中的份额、实际领取量、领取顺序和领取后的剩余份额。
 - 所有结构化返回通过 Cast JSON 输出解析，避免终端科学计数注释影响断言。
@@ -61,5 +62,5 @@ npm run integration -- burn
 
 ```text
 burn: covered 33 IBurn functions, 2 communities, 5 action types, 4 factories
-Integration test passed: burn (state reverted)
+Integration test passed: burn (state kept)
 ```
