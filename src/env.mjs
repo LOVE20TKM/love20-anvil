@@ -35,7 +35,7 @@ function requireParam(params, key, label) {
 }
 
 function optionalAddress(params, key) {
-  return isAddress(params[key]) ? params[key] : zeroAddress;
+  return isAddress(params[key]) && params[key] !== zeroAddress ? params[key] : '';
 }
 
 function requiredAddress(params, key, label) {
@@ -58,6 +58,7 @@ export function buildEnvContent(graph, root = repoRoot) {
   const extensionGroup = readNodeParams(graph, 'extension-group', 'address.extension.group.params', root);
   const groupChat = readNodeParams(graph, 'group-chat', 'address.group.chat.params', root);
   const batchTransfer = readNodeParams(graph, 'batch-transfer', 'address.batch-transfer.params', root);
+  const burn = readNodeParams(graph, 'burn', 'address.burn.params', root);
 
   const lines = ['# 由 love20-anvil 生成。重新生成请运行 npm run env。', ''];
 
@@ -90,6 +91,7 @@ export function buildEnvContent(graph, root = repoRoot) {
   addLine(lines, 'NEXT_PUBLIC_FOUNDRY_EXTENSIONS_LP_ABI_PATH', envFoundryOutPath('extension-lp'));
   addLine(lines, 'NEXT_PUBLIC_FOUNDRY_EXTENSIONS_GROUP_ABI_PATH', envFoundryOutPath('extension-group'));
   addLine(lines, 'NEXT_PUBLIC_FOUNDRY_BATCH_TRANSFER_ABI_PATH', envFoundryOutPath('batch-transfer'));
+  addLine(lines, 'NEXT_PUBLIC_FOUNDRY_BURN_ABI_PATH', envFoundryOutPath('burn'));
 
   addSection(lines, 'Sentry');
   addLine(lines, 'NEXT_PUBLIC_SENTRY_DSN', '');
@@ -127,18 +129,18 @@ export function buildEnvContent(graph, root = repoRoot) {
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_DELEGATE', requiredAddress(groupDelegate, 'groupDelegateAddress', 'group/address.group.delegate.params'));
 
   addSection(lines, 'Group Chat 地址');
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT', requiredAddress(groupChat, 'groupChatAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_ADMIN', requiredAddress(groupChat, 'groupAdminAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_BAN_LIST', requiredAddress(groupChat, 'groupBanListAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_ADMIN_BAN_SOURCE', requiredAddress(groupChat, 'adminBanSourceAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_GOV_VOTED_BAN_SOURCE', requiredAddress(groupChat, 'govVotedBanSourceAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_MEMBER', requiredAddress(groupChat, 'groupMemberAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_MEMBER_SCOPE', requiredAddress(groupChat, 'groupMemberScopeAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_JOIN_SCOPE_SOURCE', requiredAddress(groupChat, 'groupJoinScopeSourceAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_MAIN_MANAGER', requiredAddress(groupChat, 'tokenMainManagerAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_GOV_MANAGER', requiredAddress(groupChat, 'tokenGovManagerAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_ACTION_GOV_MANAGER', requiredAddress(groupChat, 'tokenActionGovManagerAddress', 'group-chat/address.group.chat.params'));
-  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_ACTION_MAIN_MANAGER', requiredAddress(groupChat, 'tokenActionMainManagerAddress', 'group-chat/address.group.chat.params'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT', optionalAddress(groupChat, 'groupChatAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_ADMIN', optionalAddress(groupChat, 'groupAdminAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_BAN_LIST', optionalAddress(groupChat, 'groupBanListAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_ADMIN_BAN_SOURCE', optionalAddress(groupChat, 'adminBanSourceAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_GOV_VOTED_BAN_SOURCE', optionalAddress(groupChat, 'govVotedBanSourceAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_MEMBER', optionalAddress(groupChat, 'groupMemberAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_MEMBER_SCOPE', optionalAddress(groupChat, 'groupMemberScopeAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_JOIN_SCOPE_SOURCE', optionalAddress(groupChat, 'groupJoinScopeSourceAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_MAIN_MANAGER', optionalAddress(groupChat, 'tokenMainManagerAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_GOV_MANAGER', optionalAddress(groupChat, 'tokenGovManagerAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_ACTION_GOV_MANAGER', optionalAddress(groupChat, 'tokenActionGovManagerAddress'));
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT_TOKEN_ACTION_MAIN_MANAGER', optionalAddress(groupChat, 'tokenActionMainManagerAddress'));
 
   addSection(lines, 'Extension 地址');
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_CENTER', requiredAddress(extension, 'centerAddress', 'extension/address.extension.center.params'));
@@ -150,6 +152,9 @@ export function buildEnvContent(graph, root = repoRoot) {
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_GROUP_ACTION_FACTORY', requiredAddress(extensionGroup, 'groupActionFactoryAddress', 'extension-group/address.extension.group.params'));
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_GROUP_RECIPIENTS', requiredAddress(extensionGroup, 'groupRecipientsAddress', 'extension-group/address.extension.group.params'));
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_EXTENSION_GROUP_SERVICE_FACTORY', requiredAddress(extensionGroup, 'groupServiceFactoryAddress', 'extension-group/address.extension.group.params'));
+
+  addSection(lines, 'Burn 地址');
+  addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_BURN', requiredAddress(burn, 'burnAddress', 'burn/address.burn.params'));
 
   addSection(lines, '可选应用地址');
   addLine(lines, 'NEXT_PUBLIC_CONTRACT_ADDRESS_BATCH_TRANSFER', optionalAddress(batchTransfer, 'batchTransferAddress'));

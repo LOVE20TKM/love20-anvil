@@ -22,11 +22,11 @@ npm run integration -- burn
 - 创建首个 LOVE20 社区及一个直接子社区。
 - 为多个账户建立 SL、ST、治理奖励和行动奖励状态。
 - 子社区完成发射、测试行动完成投票后，集成脚本取该明确治理轮次作为 `startRound`；每次都从当前 `../burn` 源码执行增量编译，并使用隔离产物部署双社区实例，避免复用陈旧字节码。
-- 部署后核对该 Burn 的 `startRound/roundCount/endRound`、全部构造参数，以及 LP V1、LP V2、链群行动、链群服务四个 Factory；空投代币使用真实 ERC20。
+- Burn 构造参数使用社区 symbol，由 Launch 解析并校验对应代币；部署后同时核对 symbol、解析后的地址、`startRound/roundCount/endRound`，以及 LP V1、LP V2、链群行动、链群服务四个 Factory；空投代币使用真实 ERC20。
 
 ## 覆盖范围
 
-- 运行时覆盖 `IBurn.sol` 全部 33 个外部函数，接口新增或遗漏会使测试失败。
+- 运行时覆盖 `IBurn.sol` 全部 37 个外部函数，接口新增或遗漏会使测试失败。
 - 覆盖两个社区和多个参与地址。
 - 覆盖 SL、ST、治理奖励和行动奖励销毁。
 - 覆盖基础行动、LP V1、LP V2、链群行动、链群服务五类行动来源。
@@ -39,7 +39,7 @@ npm run integration -- burn
 - 校验构造期社区权重、`scoreBase`、部署时供应量、单轮激励以及全部受支持 Factory。
 - 校验双地址空投事件中的份额、实际领取量、领取顺序和领取后的剩余份额。
 - 所有结构化返回通过 Cast JSON 输出解析，避免终端科学计数注释影响断言。
-- 数值报告覆盖部署权重与 `scoreBase`、各社区和地址的四类累计数量/得分、轮次 multiplier、双地址空投份额、领取数量及剩余份额/余额。
+- 数值报告覆盖部署权重与 `scoreBase`、各社区和地址的四类全周期累计数量/得分、首轮与末轮的截至轮次累计数量/得分、轮次 multiplier、双地址空投份额、领取数量及剩余份额/余额。
 
 ## 失败与原子性
 
@@ -61,6 +61,6 @@ npm run integration -- burn
 命令退出码为 0，并输出：
 
 ```text
-burn: covered 33 IBurn functions, 2 communities, 5 action types, 4 factories
+burn: covered 37 IBurn functions, 2 communities, 5 action types, 4 factories
 Integration test passed: burn (state kept)
 ```

@@ -234,15 +234,15 @@
               "source": "address.extension.center.params",
               "key": "centerAddress"
             },
-            "SCOPE_TOKEN": {
+            "SCOPE_TOKEN_SYMBOL": {
               "from": "core",
-              "source": "address.params",
-              "key": "firstTokenAddress"
+              "source": "LOVE20.params",
+              "key": "FIRST_TOKEN_SYMBOL"
             },
-            "COMMUNITY_TOKENS": {
+            "COMMUNITY_SYMBOLS": {
               "from": "core",
-              "source": "address.params",
-              "key": "firstTokenAddress"
+              "source": "LOVE20.params",
+              "key": "FIRST_TOKEN_SYMBOL"
             },
             "AIRDROP_TOKEN": {
               "from": "core",

@@ -275,9 +275,8 @@ export function hydrateAnvilFilesFromState(graph, root = repoRoot) {
     const files = state.nodes?.[node.id]?.files || {};
     for (const output of node.outputFiles || []) {
       const params = files[output.path];
-      if (!params) continue;
       const path = paramsPathForNode(node, output.path, root);
-      writeParamsFile(path, params, { merge: false });
+      writeParamsFile(path, params || {}, { merge: false });
       hydrated.push(path);
     }
   }
@@ -951,9 +950,10 @@ export function checkCrossRepoConsistency(graph, deployer, root = repoRoot) {
   pushConsistencyIssue(issues, 'extension-group centerAddress', extension.centerAddress, extensionGroupCenter.centerAddress);
 
   const burnConfig = readParamsFile(paramsPathForNode(getNode(graph, 'burn'), 'burn.params', root));
+  const coreConfig = readParamsFile(paramsPathForNode(getNode(graph, 'core'), 'LOVE20.params', root));
   pushConsistencyIssue(issues, 'burn EXTENSION_CENTER', extension.centerAddress, burnConfig.EXTENSION_CENTER);
-  pushConsistencyIssue(issues, 'burn SCOPE_TOKEN', core.firstTokenAddress, burnConfig.SCOPE_TOKEN);
-  pushConsistencyIssue(issues, 'burn COMMUNITY_TOKENS', core.firstTokenAddress, burnConfig.COMMUNITY_TOKENS);
+  pushConsistencyIssue(issues, 'burn SCOPE_TOKEN_SYMBOL', coreConfig.FIRST_TOKEN_SYMBOL, burnConfig.SCOPE_TOKEN_SYMBOL);
+  pushConsistencyIssue(issues, 'burn COMMUNITY_SYMBOLS', coreConfig.FIRST_TOKEN_SYMBOL, burnConfig.COMMUNITY_SYMBOLS);
   pushConsistencyIssue(issues, 'burn AIRDROP_TOKEN', core.rootParentTokenAddress, burnConfig.AIRDROP_TOKEN);
 
   const group = readNodeParams(graph, 'group', 'address.group.params', root);

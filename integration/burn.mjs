@@ -34,6 +34,7 @@ const BURN_EVENT_SPECS = {
     name: 'CommunityConfigFrozen',
     indexed: [['tokenAddress', 'address']],
     data: [
+      ['tokenSymbol', 'string'],
       ['weight', 'uint256'],
       ['scoreBase', 'uint256'],
       ['totalSupply', 'uint256'],
@@ -144,6 +145,7 @@ export function clearNumericReport(root) {
 
 export const burnInterfaceFunctions = [
   'extensionCenter',
+  'scopeTokenSymbol',
   'scopeTokenAddress',
   'airdropTokenAddress',
   'startRound',
@@ -153,6 +155,7 @@ export const burnInterfaceFunctions = [
   'totalCommunityWeight',
   'remainingAirdropShare',
   'communities',
+  'communitySymbols',
   'communityWeight',
   'scoreBase',
   'supportedExtensionFactories',
@@ -167,8 +170,10 @@ export const burnInterfaceFunctions = [
   'govRewardBurnState',
   'actionRewardBurnStates',
   'accountRoundBurnStats',
+  'accountBurnStatsThroughRound',
   'accountBurnStats',
   'communityRoundBurnStats',
+  'communityBurnStatsThroughRound',
   'communityBurnStats',
   'accountTokenShare',
   'accountShare',
@@ -296,7 +301,7 @@ function expectedEvent(eventName, values) {
   const fields = BURN_EVENT_SPECS[eventName];
   return Object.fromEntries([...fields.indexed, ...fields.data].map(([name, type]) => [
     name,
-    type === 'address' ? lower(values[name]) : BigInt(values[name]),
+    type === 'address' ? lower(values[name]) : type === 'string' ? String(values[name]) : BigInt(values[name]),
   ]));
 }
 
@@ -308,7 +313,7 @@ function decodeAbiFields(runner, fields, data, stage) {
   assert.equal(values.length, fields.length, `${stage}: decoded field count mismatch`);
   return Object.fromEntries(fields.map(([name, type], index) => [
     name,
-    type === 'address' ? lower(values[index]) : BigInt(values[index]),
+    type === 'address' ? lower(values[index]) : type === 'string' ? String(values[index]) : BigInt(values[index]),
   ]));
 }
 
@@ -340,6 +345,7 @@ function burnEventModel() {
   const roundTotals = new Map();
   const accountTotals = new Map();
   const communityTotals = new Map();
+  const records = [];
 
   function read(map, key) {
     return map.get(key) || { amount: 0n, score: 0n };
@@ -364,7 +370,7 @@ function burnEventModel() {
       roundTotals.set(roundKey, { amount: roundAmount, score: roundScore });
       accountTotals.set(accountKey, nextAccountTotal);
       communityTotals.set(communityKey, nextCommunityTotal);
-      return {
+      const record = {
         ...values,
         score,
         accountTotalAmount: nextAccountTotal.amount,
@@ -372,12 +378,26 @@ function burnEventModel() {
         communityTotalAmount: nextCommunityTotal.amount,
         communityTotalScore: nextCommunityTotal.score,
       };
+      records.push({ eventName, ...record });
+      return record;
     },
     accountTotal(account, token, eventName) {
       return read(accountTotals, `${lower(account)}:${lower(token)}:${eventName}`);
     },
     communityTotal(token, eventName) {
       return read(communityTotals, `${lower(token)}:${eventName}`);
+    },
+    accountThroughRound(account, token, eventName, round) {
+      return sumBurnRecords(records, round, (record) => (
+        record.eventName === eventName
+        && lower(record.account) === lower(account)
+        && lower(record.tokenAddress) === lower(token)
+      ));
+    },
+    communityThroughRound(token, eventName, round) {
+      return sumBurnRecords(records, round, (record) => (
+        record.eventName === eventName && lower(record.tokenAddress) === lower(token)
+      ));
     },
     accountEntries() {
       return [...accountTotals].map(([key, value]) => {
@@ -392,6 +412,15 @@ function burnEventModel() {
       });
     },
   };
+}
+
+function sumBurnRecords(records, round, matches) {
+  return records.reduce(
+    (total, record) => record.round <= round && matches(record)
+      ? { amount: total.amount + record.amount, score: total.score + record.score }
+      : total,
+    { amount: 0n, score: 0n },
+  );
 }
 
 function powWad(base, exponent) {
@@ -417,6 +446,7 @@ function aggregateBurnEventStats(runner, receipt, burnAddress) {
   const accountTotals = new Map();
   const communityTotals = new Map();
   const multipliers = new Map();
+  const records = [];
   const add = (map, key, event) => {
     const current = map.get(key) || { amount: 0n, score: 0n };
     map.set(key, { amount: current.amount + event.amount, score: current.score + event.score });
@@ -424,6 +454,7 @@ function aggregateBurnEventStats(runner, receipt, burnAddress) {
 
   for (const { eventName } of BURN_CATEGORIES) {
     for (const event of decodeBurnEvents(runner, receipt, burnAddress, eventName, `report:event:${eventName}`)) {
+      records.push({ eventName, ...event });
       add(accountTotals, `${event.account}:${event.tokenAddress}:${eventName}`, event);
       add(communityTotals, `${event.tokenAddress}:${eventName}`, event);
       const multiplierKey = `${event.tokenAddress}:${event.round}`;
@@ -439,6 +470,18 @@ function aggregateBurnEventStats(runner, receipt, burnAddress) {
     },
     community(token, eventName) {
       return communityTotals.get(`${lower(token)}:${eventName}`) || { amount: 0n, score: 0n };
+    },
+    accountThroughRound(account, token, eventName, round) {
+      return sumBurnRecords(records, round, (record) => (
+        record.eventName === eventName
+        && record.account === lower(account)
+        && record.tokenAddress === lower(token)
+      ));
+    },
+    communityThroughRound(token, eventName, round) {
+      return sumBurnRecords(records, round, (record) => (
+        record.eventName === eventName && record.tokenAddress === lower(token)
+      ));
     },
     multiplier(token, round) {
       const value = multipliers.get(`${lower(token)}:${round}`);
@@ -482,6 +525,7 @@ function writeNumericReport({
   claimants,
   airdropPool,
   accountLabels,
+  historyChecks,
 }) {
   const logs = contractLogs(runner, burnAddress, 'report:logs');
   const eventStats = aggregateBurnEventStats(runner, logs, burnAddress);
@@ -569,6 +613,28 @@ function writeNumericReport({
     const accountLabel = accountLabels.get(entry.account) || entry.account.slice(0, 8);
     add('地址累计', `${accountLabel}/${community.label}/${category.label}数量`, entry.amount, contract.amount, emitted.amount);
     add('地址累计', `${accountLabel}/${community.label}/${category.label}得分`, entry.score, contract.score, emitted.score);
+  }
+
+  const statsOutput = '(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))';
+  for (const check of historyChecks) {
+    const contract = burnStats(burn.callJson(
+      check.account
+        ? `accountBurnStatsThroughRound(address,address,uint256)${statsOutput}`
+        : `communityBurnStatsThroughRound(address,uint256)${statsOutput}`,
+      check.account ? [check.account, check.token, check.round] : [check.token, check.round],
+      `report:history:${check.label}:${check.round}`,
+    )[0]);
+    for (const category of BURN_CATEGORIES) {
+      const expected = check.account
+        ? theory.accountThroughRound(check.account, check.token, category.eventName, check.round)
+        : theory.communityThroughRound(check.token, category.eventName, check.round);
+      const emitted = check.account
+        ? eventStats.accountThroughRound(check.account, check.token, category.eventName, check.round)
+        : eventStats.communityThroughRound(check.token, category.eventName, check.round);
+      const metric = `${check.label}/第 ${check.round} 轮/${category.label}`;
+      add('截至轮次累计', `${metric}数量`, expected.amount, contract[category.eventName].amount, emitted.amount);
+      add('截至轮次累计', `${metric}得分`, expected.score, contract[category.eventName].score, emitted.score);
+    }
   }
 
   assert.equal(airdropEvents.length, claimants.length, 'Unexpected AirdropClaimed event count');
@@ -850,14 +916,14 @@ export function deployIntegrationBurn(root, deployer, runner, config, build = sp
   assert.ok(/^0x[0-9a-f]+$/i.test(bytecode || ''), `Missing Burn bytecode: ${artifactPath}`);
 
   const communities = `[${config.communities
-    .map((community) => `(${community.token},${community.weight})`)
+    .map((community) => `(${community.symbol},${community.weight})`)
     .join(',')}]`;
   const factories = `[${config.factories.join(',')}]`;
   const encoded = runner.run([
     'abi-encode',
-    'constructor(address,address,address,(address,uint256)[],uint256,uint256,uint256,address[])',
+    'constructor(address,string,address,(string,uint256)[],uint256,uint256,uint256,address[])',
     config.extensionCenter,
-    config.scopeToken,
+    config.scopeTokenSymbol,
     config.airdropToken,
     communities,
     String(config.startRound),
@@ -949,6 +1015,12 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     verify: coreParams.verifyAddress,
     vote: coreParams.voteAddress,
   };
+  const scopeTokenSymbol = runner.callJson(
+    core.firstToken,
+    'symbol()(string)',
+    [],
+    { stage: 'burn:scope-symbol' },
+  )[0];
 
   for (const [name, contract] of Object.entries({
     ...core,
@@ -968,6 +1040,12 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
 
   console.log('\n=== Burn integration: child community and receipts ===');
   const child = launchChildCommunity(runner, core, accounts[0], accounts[1], accounts[2]);
+  const childTokenSymbol = runner.callJson(
+    child,
+    'symbol()(string)',
+    [],
+    { stage: 'burn:child-symbol' },
+  )[0];
   const childReceipts = createChildReceipts(runner, core, child, accounts[0], accounts[2]);
   console.log('\n=== Burn integration: LP V1/V2 extension assets ===');
   const lpV1 = createLpExtension(runner, core, lpParams.lpFactoryAddress, accounts[1], 'lp-v1');
@@ -990,8 +1068,8 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   voteAction(runner, core, accounts[2], lpV2ActionId, lpRound, 'lp-v2-action:vote');
 
   const communities = [
-    { token: core.firstToken, weight: 1, label: '主社区' },
-    { token: child, weight: 2, label: '子社区' },
+    { symbol: scopeTokenSymbol, token: core.firstToken, weight: 1, label: '主社区' },
+    { symbol: childTokenSymbol, token: child, weight: 2, label: '子社区' },
   ];
   console.log(`  burn: deploying integration contract with explicit startRound=${groupRound}`);
   const burnAddress = deployIntegrationBurn(root, deployer, runner, {
@@ -1001,7 +1079,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     factories,
     quotaMultiplier: 5,
     roundCount: 3,
-    scopeToken: core.firstToken,
+    scopeTokenSymbol,
     startRound: groupRound,
   });
   console.log(`  burn: fixture deployed at ${burnAddress}`);
@@ -1009,6 +1087,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   const theory = burnEventModel();
 
   assert.equal(lower(address(burn.call('extensionCenter()(address)', [], 'burn:extension-center'))), lower(extensionParams.centerAddress));
+  assert.deepEqual(burn.callJson('scopeTokenSymbol()(string)', [], 'burn:scope-symbol-view'), [scopeTokenSymbol]);
   assert.equal(lower(address(burn.call('scopeTokenAddress()(address)', [], 'burn:scope-token'))), lower(core.firstToken));
   assert.equal(lower(address(burn.call('airdropTokenAddress()(address)', [], 'burn:airdrop-token'))), lower(core.rootParent));
   assert.equal(uint(burn.call('startRound()(uint256)', [], 'burn:start-round')), groupRound);
@@ -1018,6 +1097,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   assert.equal(uint(burn.call('totalCommunityWeight()(uint256)', [], 'burn:total-community-weight')), 3n);
   assert.equal(uint(burn.call('remainingAirdropShare()(uint256)', [], 'burn:remaining-share')), WAD);
   assert.deepEqual(addresses(burn.call('communities()(address[])', [], 'burn:communities')).map(lower), [core.firstToken, child].map(lower));
+  assert.deepEqual(JSON.parse(burn.call('communitySymbols()(string[])', [], 'burn:community-symbols')), [scopeTokenSymbol, childTokenSymbol]);
   assert.equal(uint(burn.call('communityWeight(address)(uint256)', [core.firstToken], 'burn:first-weight')), 1n);
   assert.equal(uint(burn.call('communityWeight(address)(uint256)', [child], 'burn:child-weight')), 2n);
   assert.ok(uint(burn.call('scoreBase(address)(uint256)', [core.firstToken], 'burn:first-score-base')) >= WAD);
@@ -1029,12 +1109,13 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   const deploymentLogs = contractLogs(runner, burnAddress, 'event:deployment-logs');
   const rewardRatePerThousand = uint(runner.call(core.mint, 'ROUND_REWARD_GOV_PER_THOUSAND()(uint256)', [], { stage: 'event:gov-rate' }))
     + uint(runner.call(core.mint, 'ROUND_REWARD_ACTION_PER_THOUSAND()(uint256)', [], { stage: 'event:action-rate' }));
-  const theoreticalCommunities = communities.map(({ token, weight, label }) => {
+  const theoreticalCommunities = communities.map(({ symbol, token, weight, label }) => {
     const totalSupply = uint(runner.call(token, 'totalSupply()(uint256)', [], { stage: `event:community:${token}:total-supply` }));
     const maxSupply = uint(runner.call(token, 'maxSupply()(uint256)', [], { stage: `event:community:${token}:max-supply` }));
     const deploymentRoundReward = ((maxSupply - totalSupply) * rewardRatePerThousand) / 1000n;
     return {
       tokenAddress: token,
+      tokenSymbol: symbol,
       label,
       weight,
       scoreBase: WAD + (deploymentRoundReward * WAD) / totalSupply,
@@ -1226,10 +1307,24 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     assert.equal(govState[2], 'true');
     assert.equal(BigInt(govState[4]), 1n);
     assert.ok(actionStateIds(burn.callJson('actionRewardBurnStates(address,address,uint256)((uint256,address,(uint256,uint256,bool,uint256,uint256,uint256))[])', [fixture.roles.groupActionParticipant.address, core.firstToken, groupRound], 'burn:group-action-states')).includes(fixture.setup.groupActionId));
-    const childRoundStats = tupleUints(burn.callJson('accountRoundBurnStats(address,address,uint256)(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))', [accounts[2].address, child, groupRound], 'burn:child-round-stats')[0]);
+    const statsOutput = '(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))';
+    const accountThroughStatsSignature = `accountBurnStatsThroughRound(address,address,uint256)${statsOutput}`;
+    const communityThroughStatsSignature = `communityBurnStatsThroughRound(address,uint256)${statsOutput}`;
+    const childRoundStats = tupleUints(burn.callJson(`accountRoundBurnStats(address,address,uint256)${statsOutput}`, [accounts[2].address, child, groupRound], 'burn:child-round-stats')[0]);
     assert.ok(childRoundStats[0] > 0n && childRoundStats[2] > 0n, 'Child SL/ST lock stats were not recorded');
-    const communityRoundStats = tupleUints(burn.callJson('communityRoundBurnStats(address,uint256)(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))', [core.firstToken, groupRound], 'burn:first-community-round-stats')[0]);
+    assert.deepEqual(
+      tupleUints(burn.callJson(accountThroughStatsSignature, [accounts[2].address, child, groupRound], 'burn:child-stats-through-group-round')[0]),
+      childRoundStats,
+    );
+    const communityRoundStats = tupleUints(burn.callJson(`communityRoundBurnStats(address,uint256)${statsOutput}`, [core.firstToken, groupRound], 'burn:first-community-round-stats')[0]);
     assert.ok([0, 2, 4, 6].every((index) => communityRoundStats[index] > 0n), 'First community category stats were not recorded');
+    const firstCommunityThroughGroupRound = tupleUints(
+      burn.callJson(communityThroughStatsSignature, [core.firstToken, groupRound], 'burn:first-community-stats-through-group-round')[0],
+    );
+    assert.deepEqual(firstCommunityThroughGroupRound, communityRoundStats);
+    const account1ThroughGroupRound = tupleUints(
+      burn.callJson(accountThroughStatsSignature, [accounts[1].address, core.firstToken, groupRound], 'burn:account1-stats-through-group-round')[0],
+    );
 
     console.log('\n=== Burn integration: LP V1/V2 round verify and burn ===');
     verifyActions(runner, core, lpRound, [
@@ -1327,7 +1422,29 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     assert.equal(account1Finalized, 'true');
     assert.equal(account2Finalized, 'true');
     assert.equal(onlyTuple(burn.callJson('accountTokenShare(address,address)((uint256,uint256,uint256,uint256,uint256,bool))', [accounts[2].address, child], 'burn:child-token-share'))[5], 'true');
-    assert.ok(tupleUints(burn.callJson('accountBurnStats(address,address)(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))', [accounts[1].address, core.firstToken], 'burn:account-stats')[0]).some((value) => value > 0n));
+    const account1TotalStats = tupleUints(
+      burn.callJson(`accountBurnStats(address,address)${statsOutput}`, [accounts[1].address, core.firstToken], 'burn:account-stats')[0],
+    );
+    assert.ok(account1TotalStats.some((value) => value > 0n));
+    const firstCommunityTotalStats = tupleUints(
+      burn.callJson(`communityBurnStats(address)${statsOutput}`, [core.firstToken], 'burn:first-community-stats')[0],
+    );
+    assert.deepEqual(
+      tupleUints(burn.callJson(accountThroughStatsSignature, [accounts[1].address, core.firstToken, groupRound], 'burn:account1-historical-stats-after-end')[0]),
+      account1ThroughGroupRound,
+    );
+    assert.deepEqual(
+      tupleUints(burn.callJson(communityThroughStatsSignature, [core.firstToken, groupRound], 'burn:first-community-historical-stats-after-end')[0]),
+      firstCommunityThroughGroupRound,
+    );
+    assert.deepEqual(
+      tupleUints(burn.callJson(accountThroughStatsSignature, [accounts[1].address, core.firstToken, endRound], 'burn:account1-stats-through-end')[0]),
+      account1TotalStats,
+    );
+    assert.deepEqual(
+      tupleUints(burn.callJson(communityThroughStatsSignature, [core.firstToken, endRound], 'burn:first-community-stats-through-end')[0]),
+      firstCommunityTotalStats,
+    );
     assert.ok(tupleUints(burn.callJson('communityBurnStats(address)(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))', [child], 'burn:community-stats')[0]).some((value) => value > 0n));
     assert.ok(uint(burn.call('participantsCount()(uint256)', [], 'burn:participants-count')) >= 2n);
     const participants = addresses(burn.call('participants(uint256,uint256)(address[])', [0, 20], 'burn:participants')).map(lower);
@@ -1412,7 +1529,18 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
       ],
       airdropPool,
       accountLabels: new Map(accounts.map((account) => [lower(account.address), account.label])),
+      historyChecks: [
+        { label: `${accounts[1].label}/主社区`, account: accounts[1].address, token: core.firstToken, round: groupRound },
+        { label: '主社区', token: core.firstToken, round: groupRound },
+        { label: `${accounts[1].label}/主社区`, account: accounts[1].address, token: core.firstToken, round: endRound },
+        { label: '主社区', token: core.firstToken, round: endRound },
+      ],
     });
+    assert.equal(
+      numericReport.rows.filter(({ section }) => section === '截至轮次累计').length,
+      4 * BURN_CATEGORIES.length * 2,
+      'Historical cumulative numeric rows are incomplete',
+    );
     console.log(`  burn: numeric report passed ${numericReport.rows.length} metrics -> ${numericReport.path}`);
   } finally {
     resumeMining(runner, graph.network.secondsPerBlock, 'burn:restore-mining');

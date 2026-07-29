@@ -161,6 +161,9 @@ function makeEnvFixture() {
   writeAnvilParams(root, 'batch-transfer', 'address.batch-transfer.params', {
     batchTransferAddress: addr(701),
   });
+  writeAnvilParams(root, 'burn', 'address.burn.params', {
+    burnAddress: addr(801),
+  });
 
   return root;
 }
@@ -645,6 +648,21 @@ describe('external repository isolation', () => {
     }
   });
 
+  it('clears output files that are missing from deployment state', async () => {
+    const { addressPath, graph, original, root } = isolationFixture();
+    writeFileSync(join(root, 'state/addresses.json'), `${JSON.stringify({ nodes: { core: { files: {} } } })}\n`);
+
+    try {
+      await withPreservedExternalRepositories(graph, () => {
+        assert.equal(readFileSync(addressPath, 'utf8').trim(), '');
+      }, root);
+
+      assert.equal(readFileSync(addressPath, 'utf8'), original);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('restores existing files when the command fails', async () => {
     const { addressPath, graph, original, root } = isolationFixture();
 
@@ -886,7 +904,6 @@ describe('integration runner', () => {
     const publicInterface = source.slice(source.indexOf('interface IBurn is'));
     const functions = [...publicInterface.matchAll(/\bfunction\s+(\w+)\s*\(/g)].map((match) => match[1]);
 
-    assert.equal(functions.length, 33);
     assert.deepEqual([...burnInterfaceFunctions].sort(), functions.sort());
   });
 
@@ -940,12 +957,16 @@ describe('integration runner', () => {
 
   it('renders three-source numeric rows and rejects any mismatch', () => {
     const metadata = { burnAddress: addr(2), startRound: 32n, endRound: 33n };
-    const rows = [{ section: 'Airdrop', metric: 'account1 claimed amount', theory: 11n, contract: 11n, event: 11n }];
+    const rows = [
+      { section: 'Airdrop', metric: 'account1 claimed amount', theory: 11n, contract: 11n, event: 11n },
+      { section: '截至轮次累计', metric: 'account1/主社区/第 32 轮/SL 数量', theory: 7n, contract: 7n, event: 7n },
+    ];
 
     const report = renderNumericReport(metadata, rows);
     assert.ok(report.includes(`集成测试 Burn: \`${addr(2)}\``));
     assert.match(report, /明确配置轮次: 32 - 33/);
     assert.match(report, /\| Airdrop \| account1 claimed amount \| 11 \| 11 \| 11 \| PASS \|/);
+    assert.match(report, /\| 截至轮次累计 \| account1\/主社区\/第 32 轮\/SL 数量 \| 7 \| 7 \| 7 \| PASS \|/);
     assert.throws(
       () => renderNumericReport(metadata, [{ ...rows[0], event: 10n }]),
       /account1 claimed amount: theory=11 contract=11 event=10/,
@@ -988,12 +1009,12 @@ describe('integration runner', () => {
 
       const deployed = deployIntegrationBurn(root, deployer, runner, {
         airdropToken: addr(3),
-        communities: [{ token: addr(4), weight: 2 }],
+        communities: [{ symbol: 'TOKEN1', weight: 2 }],
         extensionCenter: addr(1),
         factories: [addr(5)],
         quotaMultiplier: 5,
         roundCount: 2,
-        scopeToken: addr(2),
+        scopeTokenSymbol: 'TOKEN1',
         startRound: 7,
       }, (...args) => {
         builds.push(args);
@@ -1010,12 +1031,12 @@ describe('integration runner', () => {
       assert.throws(
         () => deployIntegrationBurn(root, deployer, runner, {
           airdropToken: addr(3),
-          communities: [{ token: addr(4), weight: 2 }],
+          communities: [{ symbol: 'TOKEN1', weight: 2 }],
           extensionCenter: addr(1),
           factories: [addr(5)],
           quotaMultiplier: 5,
           roundCount: 2,
-          scopeToken: addr(2),
+          scopeTokenSymbol: 'TOKEN1',
           startRound: 'current',
         }),
         /startRound must be explicit/,
@@ -1577,6 +1598,7 @@ describe('env generation', () => {
         { id: 'extension-group', repo: 'extension-group' },
         { id: 'group-chat', repo: 'group-chat' },
         { id: 'batch-transfer', repo: 'batch-transfer' },
+        { id: 'burn', repo: 'burn' },
       ],
     };
 
@@ -1586,8 +1608,16 @@ describe('env generation', () => {
       assert.match(env, /NEXT_PUBLIC_BLOCK_TIME_MS=3000/);
       assert.match(env, /NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT=/);
       assert.match(env, /NEXT_PUBLIC_CONTRACT_ADDRESS_BATCH_TRANSFER=/);
+      assert.match(env, new RegExp(`NEXT_PUBLIC_CONTRACT_ADDRESS_BURN=${addr(801)}`));
       assert.match(env, /NEXT_PUBLIC_CONTRACT_ADDRESS_UNISWAP_V2_ZAP=/);
       assert.match(env, /NEXT_PUBLIC_FOUNDRY_GROUP_CHAT_ABI_PATH=\.\.\/love20-anvil\/\.foundry\/group-chat\/out\//);
+      assert.match(env, /NEXT_PUBLIC_FOUNDRY_BURN_ABI_PATH=\.\.\/love20-anvil\/\.foundry\/burn\/out\//);
+
+      writeAnvilParams(root, 'group-chat', 'address.group.chat.params', {});
+      writeAnvilParams(root, 'batch-transfer', 'address.batch-transfer.params', {});
+      const partialEnv = buildEnvContent(graph, root);
+      assert.match(partialEnv, /NEXT_PUBLIC_CONTRACT_ADDRESS_GROUP_CHAT=\n/);
+      assert.match(partialEnv, /NEXT_PUBLIC_CONTRACT_ADDRESS_BATCH_TRANSFER=\n/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
