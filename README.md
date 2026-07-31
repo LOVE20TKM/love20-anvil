@@ -162,7 +162,8 @@ npm run seed:group-chat
 2. 在 `integration/<node>.md` 记录前置条件、覆盖范围、失败路径和验收标准。
 3. 在部署图对应节点配置 `"integrationTest": "integration/<node>.mjs"`。
 4. 场景通过 `context.params(nodeId, file)` 读取本次部署地址，通过 `context.runner.call/send/rpc` 操作真实 Anvil 合约。
-5. 运行 `npm run integration -- <node>`。测试后默认保留链状态；需要隔离运行时添加 `--revert-state`，快照和回滚由运行器统一处理。
+5. 配置了 `integrationOwnsDeployment` 的场景返回 `{ outputs, onSuccess? }`：`outputs` 按节点 `outputFiles` 的文件和 key 结构提供本轮部署地址；`onSuccess` 仅用于提交报告等成功产物，在地址写回或链状态回滚成功后执行。
+6. 运行 `npm run integration -- <node>`。测试后默认保留链状态；需要隔离运行时添加 `--revert-state`，快照和回滚由运行器统一处理。
 
 ## 设计规则
 

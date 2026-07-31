@@ -509,7 +509,7 @@ function theoryAccountShare(theory, communities, account) {
   }, 0n);
 }
 
-function writeNumericReport({
+function buildNumericReport({
   root,
   runner,
   burn,
@@ -671,8 +671,7 @@ function writeNumericReport({
   );
 
   const reportPath = numericReportPath(root);
-  mkdirSync(resolve(root, 'state/logs'), { recursive: true });
-  writeFileSync(reportPath, renderNumericReport({
+  const content = renderNumericReport({
     burnAddress,
     startRound,
     endRound,
@@ -680,8 +679,8 @@ function writeNumericReport({
       ...communities.map((community) => ({ label: community.label, address: community.token })),
       ...claimants.map((claimant) => ({ label: claimant.label, address: claimant.account })),
     ],
-  }, rows));
-  return { path: reportPath, rows };
+  }, rows);
+  return { content, path: reportPath, rows };
 }
 
 function contractLogs(runner, contract, stage) {
@@ -1138,6 +1137,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
 
   runner.txValue(core.rootParent, 'deposit()', WAD, [], accounts[0], { stage: 'airdrop:fund-deployer' });
   pauseMining(runner, 'burn:manual-mining');
+  let numericReport;
   try {
     console.log('\n=== Burn integration: group round verify ===');
     advanceToRound(runner, core.verify, groupRound, 'group-round:verify');
@@ -1510,7 +1510,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     });
     assert.equal(balanceOf(runner, core.rootParent, accounts[1].address, 'airdrop:account1-after-rejected-claim'), before1 + claimed1);
 
-    const numericReport = writeNumericReport({
+    numericReport = buildNumericReport({
       root,
       runner,
       burn,
@@ -1541,11 +1541,18 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
       4 * BURN_CATEGORIES.length * 2,
       'Historical cumulative numeric rows are incomplete',
     );
-    console.log(`  burn: numeric report passed ${numericReport.rows.length} metrics -> ${numericReport.path}`);
   } finally {
     resumeMining(runner, graph.network.secondsPerBlock, 'burn:restore-mining');
   }
 
   assertBurnCoverage(burn);
   console.log(`  burn: covered ${burn.covered.size} IBurn functions, 2 communities, 5 action types, ${factories.length} factories`);
+  return {
+    outputs: { 'address.burn.params': { burnAddress } },
+    onSuccess() {
+      mkdirSync(resolve(root, 'state/logs'), { recursive: true });
+      writeFileSync(numericReport.path, numericReport.content);
+      console.log(`  burn: numeric report passed ${numericReport.rows.length} metrics -> ${numericReport.path}`);
+    },
+  };
 }

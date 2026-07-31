@@ -489,6 +489,24 @@ export function validateStateNodeOutputs(graph, node, root = repoRoot) {
   );
 }
 
+export function validateNodeOutputFiles(node, files) {
+  validateRequiredNodeOutputs(node, (output) => files?.[output.path], 'integration ');
+}
+
+export function writeStateNodeOutputs(graph, nodeId, files, root = repoRoot) {
+  const node = getNode(graph, nodeId);
+  validateNodeOutputFiles(node, files);
+
+  const statePath = join(root, 'state/addresses.json');
+  if (!existsSync(statePath)) {
+    throw new Error(`Missing deployment state: ${statePath}; run npm run deploy first.`);
+  }
+  const state = loadJson(statePath);
+  state.nodes[nodeId] = { repo: node.repo, files };
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  return statePath;
+}
+
 export function validateAllOutputs(graph, root = repoRoot) {
   for (const node of graph.nodes) {
     validateNodeOutputs(graph, node, root);

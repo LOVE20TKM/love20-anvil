@@ -7,7 +7,9 @@ import {
   preflight,
   readStateNodeParams,
   repoRoot,
+  validateNodeOutputFiles,
   validateStateNodeOutputs,
+  writeStateNodeOutputs,
 } from './lib.mjs';
 
 function rpcValue(output) {
@@ -43,6 +45,7 @@ export async function runIntegrationTest(graph, deployer, target, options = {}) 
   const snapshot = options.revertState
     ? rpcValue(runner.rpc('evm_snapshot', [], { stage: 'integration:snapshot' }))
     : undefined;
+  let result;
   let testError;
   try {
     const moduleUrl = pathToFileURL(resolve(root, node.integrationTest));
@@ -51,7 +54,7 @@ export async function runIntegrationTest(graph, deployer, target, options = {}) 
       throw new Error(`${node.integrationTest} must export run(context)`);
     }
 
-    await scenario.run({
+    result = await scenario.run({
       accounts: anvilAccounts,
       deployer,
       graph,
@@ -78,4 +81,12 @@ export async function runIntegrationTest(graph, deployer, target, options = {}) 
   }
 
   if (testError) throw testError;
+  if (node.integrationOwnsDeployment) {
+    if (snapshot === undefined) {
+      writeStateNodeOutputs(graph, node.id, result?.outputs, root);
+    } else {
+      validateNodeOutputFiles(node, result?.outputs);
+    }
+  }
+  await result?.onSuccess?.();
 }

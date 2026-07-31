@@ -14,7 +14,7 @@ npm run integration -- burn
 
 测试成功或失败后默认保留 Anvil 现场。再次运行前需重启 fresh Anvil 并重新部署；需要隔离运行并在结束后回滚时使用 `npm run integration -- burn --revert-state`。
 
-每次运行开始时会先删除旧报告；仅当本轮全部校验通过后，才生成 [`state/logs/burn-numeric-report.md`](../state/logs/burn-numeric-report.md)。报告中的 Burn 就是集成场景在完成治理和子社区前置状态后部署的唯一被测实例；数值表逐项并列展示独立理论模型、该 Burn 公共查询接口和该 Burn 事件重建结果，任意三方数值不一致都会直接使集成测试失败。
+每次运行开始时会先删除旧报告；仅当本轮全部校验、地址写回或链状态回滚成功后，才生成 [`state/logs/burn-numeric-report.md`](../state/logs/burn-numeric-report.md)。报告中的 Burn 就是集成场景在完成治理和子社区前置状态后部署的唯一被测实例；数值表逐项并列展示独立理论模型、该 Burn 公共查询接口和该 Burn 事件重建结果，任意三方数值不一致都会直接使集成测试失败。
 
 ## 前置状态
 

@@ -1061,8 +1061,16 @@ describe('integration runner', () => {
     }
   });
 
-  it('lets a scenario deploy its own target contract', async () => {
-    const { graph, root } = fixture('export async function run() {}');
+  it('records a scenario-owned deployment in state', async () => {
+    const { graph, root } = fixture(`
+      import { writeFileSync } from 'node:fs';
+      export async function run({ root }) {
+        return {
+          outputs: { 'address.burn.params': { burnAddress: '${addr(3)}' } },
+          onSuccess() { writeFileSync(root + '/success', 'committed'); },
+        };
+      }
+    `);
     const runner = fakeRunner();
     graph.nodes[0].integrationOwnsDeployment = true;
     const statePath = join(root, 'state/addresses.json');
@@ -1071,7 +1079,67 @@ describe('integration runner', () => {
     writeFileSync(statePath, `${JSON.stringify(state)}\n`);
     try {
       await runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner });
+      assert.equal(
+        JSON.parse(readFileSync(statePath, 'utf8')).nodes.burn.files['address.burn.params'].burnAddress,
+        addr(3),
+      );
+      assert.equal(readFileSync(join(root, 'success'), 'utf8'), 'committed');
       assert.deepEqual(runner.calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not commit success output when deployment state validation fails', async () => {
+    const { graph, root } = fixture(`
+      import { writeFileSync } from 'node:fs';
+      export async function run({ root }) {
+        return {
+          outputs: { 'address.burn.params': {} },
+          onSuccess() { writeFileSync(root + '/success', 'committed'); },
+        };
+      }
+    `);
+    const runner = fakeRunner();
+    graph.nodes[0].integrationOwnsDeployment = true;
+    try {
+      await assert.rejects(
+        () => runIntegrationTest(graph, deployer, 'burn', { preflight: false, root, runner }),
+        /missing integration address\.burn\.params:burnAddress/,
+      );
+      assert.equal(existsSync(join(root, 'success')), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('validates scenario-owned outputs before committing reverted success output', async () => {
+    const { graph, root } = fixture(`
+      import { writeFileSync } from 'node:fs';
+      export async function run({ root }) {
+        return {
+          outputs: { 'address.burn.params': {} },
+          onSuccess() { writeFileSync(root + '/success', 'committed'); },
+        };
+      }
+    `);
+    const runner = fakeRunner();
+    graph.nodes[0].integrationOwnsDeployment = true;
+    try {
+      await assert.rejects(
+        () => runIntegrationTest(graph, deployer, 'burn', {
+          preflight: false,
+          revertState: true,
+          root,
+          runner,
+        }),
+        /missing integration address\.burn\.params:burnAddress/,
+      );
+      assert.deepEqual(runner.calls, [
+        ['evm_snapshot', []],
+        ['evm_revert', ['0x1']],
+      ]);
+      assert.equal(existsSync(join(root, 'success')), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1092,8 +1160,13 @@ describe('integration runner', () => {
   });
 
   it('reverts scenario state when requested', async () => {
-    const { graph, root } = fixture();
+    const { graph, root } = fixture(`
+      export async function run() {
+        return { outputs: { 'address.burn.params': { burnAddress: '${addr(3)}' } } };
+      }
+    `);
     const runner = fakeRunner();
+    graph.nodes[0].integrationOwnsDeployment = true;
     try {
       await runIntegrationTest(graph, deployer, 'burn', {
         preflight: false,
@@ -1105,6 +1178,10 @@ describe('integration runner', () => {
         ['evm_snapshot', []],
         ['evm_revert', ['0x1']],
       ]);
+      assert.equal(
+        JSON.parse(readFileSync(join(root, 'state/addresses.json'), 'utf8')).nodes.burn.files['address.burn.params'].burnAddress,
+        addr(2),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
