@@ -26,7 +26,7 @@ npm run integration -- burn
 
 ## 覆盖范围
 
-- 运行时覆盖 `IBurn.sol` 全部 37 个外部函数，接口新增或遗漏会使测试失败。
+- 运行时覆盖 `IBurn.sol` 全部 41 个外部函数，接口新增或遗漏会使测试失败。
 - 覆盖两个社区和多个参与地址。
 - 覆盖 SL、ST、治理奖励和行动奖励销毁。
 - 覆盖基础行动、LP V1、LP V2、链群行动、链群服务五类行动来源。
@@ -36,7 +36,7 @@ npm run integration -- burn
 - 通过 ABI 结构化解码校验每个 indexed topic 和 data 字段，不只检查 `topic0` 或事件数量。
 - 校验操作数量、得分系数、操作得分、地址与社区全周期累计数量和累计得分。
 - 连续覆盖三个销毁轮次，以真实事件校验开始、中间、最后一轮的 `scoreBase²`、`scoreBase¹`、`1` 三档得分系数。
-- 校验构造期社区权重、`scoreBase`、部署时供应量、单轮激励以及全部受支持 Factory。
+- 校验构造期社区权重、`1:3:5:7` 四类资产权重、`scoreBase`、部署时供应量、单轮激励以及全部受支持 Factory。
 - 校验双地址空投事件中的份额、实际领取量、领取顺序和领取后的剩余份额。
 - 所有结构化返回通过 Cast JSON 输出解析，避免终端科学计数注释影响断言。
 - 数值报告覆盖部署权重与 `scoreBase`、各社区和地址的四类全周期累计数量/得分、首轮与末轮的截至轮次累计数量/得分、轮次 multiplier、双地址空投份额、领取数量及剩余份额/余额。
@@ -61,6 +61,6 @@ npm run integration -- burn
 命令退出码为 0，并输出：
 
 ```text
-burn: covered 37 IBurn functions, 2 communities, 5 action types, 4 factories
+burn: covered 41 IBurn functions, 2 communities, 5 action types, 4 factories
 Integration test passed: burn (state kept)
 ```

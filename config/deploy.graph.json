@@ -224,6 +224,7 @@
           "target": "burn.params",
           "values": {
             "COMMUNITY_WEIGHTS": "1",
+            "CATEGORY_WEIGHTS": "1:1:1:1",
             "START_ROUND": "6",
             "ROUND_COUNT": "3",
             "QUOTA_MULTIPLIER": "5"

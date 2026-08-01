@@ -83,10 +83,10 @@ const BURN_EVENT_SPECS = {
   },
 };
 const BURN_CATEGORIES = [
-  { eventName: 'sl', label: 'SL 锁仓' },
-  { eventName: 'st', label: 'ST 锁仓' },
-  { eventName: 'gov', label: '治理奖励销毁' },
-  { eventName: 'action', label: '行动奖励销毁' },
+  { categoryKey: 'sl', label: 'SL 锁仓' },
+  { categoryKey: 'st', label: 'ST 锁仓' },
+  { categoryKey: 'gov', label: '治理奖励销毁' },
+  { categoryKey: 'action', label: '行动奖励销毁' },
 ];
 
 function burnEventSignature(eventName) {
@@ -152,6 +152,10 @@ export const burnInterfaceFunctions = [
   'roundCount',
   'endRound',
   'quotaMultiplier',
+  'slTokenLockWeight',
+  'stTokenLockWeight',
+  'govRewardBurnWeight',
+  'actionRewardBurnWeight',
   'totalCommunityWeight',
   'remainingAirdropShare',
   'communities',
@@ -436,7 +440,7 @@ function powWad(base, exponent) {
 function burnStats(value) {
   const values = tupleUints(value);
   assert.equal(values.length, BURN_CATEGORIES.length * 2, `Expected BurnStats, got: ${value}`);
-  return Object.fromEntries(BURN_CATEGORIES.map(({ eventName }, index) => [eventName, {
+  return Object.fromEntries(BURN_CATEGORIES.map(({ categoryKey }, index) => [categoryKey, {
     amount: values[index * 2],
     score: values[index * 2 + 1],
   }]));
@@ -452,11 +456,11 @@ function aggregateBurnEventStats(runner, receipt, burnAddress) {
     map.set(key, { amount: current.amount + event.amount, score: current.score + event.score });
   };
 
-  for (const { eventName } of BURN_CATEGORIES) {
-    for (const event of decodeBurnEvents(runner, receipt, burnAddress, eventName, `report:event:${eventName}`)) {
-      records.push({ eventName, ...event });
-      add(accountTotals, `${event.account}:${event.tokenAddress}:${eventName}`, event);
-      add(communityTotals, `${event.tokenAddress}:${eventName}`, event);
+  for (const { categoryKey } of BURN_CATEGORIES) {
+    for (const event of decodeBurnEvents(runner, receipt, burnAddress, categoryKey, `report:event:${categoryKey}`)) {
+      records.push({ eventName: categoryKey, ...event });
+      add(accountTotals, `${event.account}:${event.tokenAddress}:${categoryKey}`, event);
+      add(communityTotals, `${event.tokenAddress}:${categoryKey}`, event);
       const multiplierKey = `${event.tokenAddress}:${event.round}`;
       const previous = multipliers.get(multiplierKey);
       if (previous !== undefined) assert.equal(event.scoreMultiplier, previous, `Event multiplier changed for ${multiplierKey}`);
@@ -491,19 +495,20 @@ function aggregateBurnEventStats(runner, receipt, burnAddress) {
   };
 }
 
-function theoryAccountShare(theory, communities, account) {
+function theoryAccountShare(theory, communities, categoryWeights, account) {
   const active = communities.filter(({ token }) => (
-    BURN_CATEGORIES.some(({ eventName }) => theory.communityTotal(token, eventName).score > 0n)
+    BURN_CATEGORIES.some(({ categoryKey }) => theory.communityTotal(token, categoryKey).score > 0n)
   ));
   const activeWeight = active.reduce((sum, community) => sum + BigInt(community.weight), 0n);
 
   return active.reduce((total, community) => {
-    const categories = BURN_CATEGORIES.filter(({ eventName }) => theory.communityTotal(community.token, eventName).score > 0n);
+    const categories = BURN_CATEGORIES.filter(({ categoryKey }) => theory.communityTotal(community.token, categoryKey).score > 0n);
     const communityShare = (BigInt(community.weight) * WAD) / activeWeight;
-    const categoryShare = communityShare / BigInt(categories.length);
-    return total + categories.reduce((share, { eventName }) => {
-      const accountScore = theory.accountTotal(account, community.token, eventName).score;
-      const communityScore = theory.communityTotal(community.token, eventName).score;
+    const activeCategoryWeight = categories.reduce((sum, { categoryKey }) => sum + BigInt(categoryWeights[categoryKey]), 0n);
+    return total + categories.reduce((share, { categoryKey }) => {
+      const accountScore = theory.accountTotal(account, community.token, categoryKey).score;
+      const communityScore = theory.communityTotal(community.token, categoryKey).score;
+      const categoryShare = (communityShare * BigInt(categoryWeights[categoryKey])) / activeCategoryWeight;
       return share + (categoryShare * accountScore) / communityScore;
     }, 0n);
   }, 0n);
@@ -518,6 +523,7 @@ function buildNumericReport({
   startRound,
   endRound,
   communities,
+  categoryWeights,
   factories,
   theory,
   theoreticalCommunities,
@@ -594,16 +600,16 @@ function buildNumericReport({
       `report:${community.label}:community-stats`,
     )[0]);
     for (const category of BURN_CATEGORIES) {
-      const expected = theory.communityTotal(community.token, category.eventName);
-      const emitted = eventStats.community(community.token, category.eventName);
-      add('社区累计', `${community.label}${category.label}数量`, expected.amount, contract[category.eventName].amount, emitted.amount);
-      add('社区累计', `${community.label}${category.label}得分`, expected.score, contract[category.eventName].score, emitted.score);
+      const expected = theory.communityTotal(community.token, category.categoryKey);
+      const emitted = eventStats.community(community.token, category.categoryKey);
+      add('社区累计', `${community.label}${category.label}数量`, expected.amount, contract[category.categoryKey].amount, emitted.amount);
+      add('社区累计', `${community.label}${category.label}得分`, expected.score, contract[category.categoryKey].score, emitted.score);
     }
   }
 
   for (const entry of theory.accountEntries()) {
     const community = communities.find(({ token }) => lower(token) === entry.token);
-    const category = BURN_CATEGORIES.find(({ eventName }) => eventName === entry.eventName);
+    const category = BURN_CATEGORIES.find(({ categoryKey }) => categoryKey === entry.eventName);
     const contract = burnStats(burn.callJson(
       'accountBurnStats(address,address)(((uint256,uint256),(uint256,uint256),(uint256,uint256),(uint256,uint256)))',
       [entry.account, entry.token],
@@ -626,14 +632,14 @@ function buildNumericReport({
     )[0]);
     for (const category of BURN_CATEGORIES) {
       const expected = check.account
-        ? theory.accountThroughRound(check.account, check.token, category.eventName, check.round)
-        : theory.communityThroughRound(check.token, category.eventName, check.round);
+        ? theory.accountThroughRound(check.account, check.token, category.categoryKey, check.round)
+        : theory.communityThroughRound(check.token, category.categoryKey, check.round);
       const emitted = check.account
-        ? eventStats.accountThroughRound(check.account, check.token, category.eventName, check.round)
-        : eventStats.communityThroughRound(check.token, category.eventName, check.round);
+        ? eventStats.accountThroughRound(check.account, check.token, category.categoryKey, check.round)
+        : eventStats.communityThroughRound(check.token, category.categoryKey, check.round);
       const metric = `${check.label}/第 ${check.round} 轮/${category.label}`;
-      add('截至轮次累计', `${metric}数量`, expected.amount, contract[category.eventName].amount, emitted.amount);
-      add('截至轮次累计', `${metric}得分`, expected.score, contract[category.eventName].score, emitted.score);
+      add('截至轮次累计', `${metric}数量`, expected.amount, contract[category.categoryKey].amount, emitted.amount);
+      add('截至轮次累计', `${metric}得分`, expected.score, contract[category.categoryKey].score, emitted.score);
     }
   }
 
@@ -641,7 +647,7 @@ function buildNumericReport({
   let theoreticalPool = airdropPool;
   let theoreticalRemainingShare = WAD;
   for (const [index, claimant] of claimants.entries()) {
-    const share = theoryAccountShare(theory, communities, claimant.account);
+    const share = theoryAccountShare(theory, communities, categoryWeights, claimant.account);
     const amount = (theoreticalPool * share) / theoreticalRemainingShare;
     const state = airdropState(burn.callJson(
       'accountAirdropState(address)((bool,bool,bool,uint256,uint256,uint256))',
@@ -920,14 +926,16 @@ export function deployIntegrationBurn(root, deployer, runner, config, build = sp
   const factories = `[${config.factories.join(',')}]`;
   const encoded = runner.run([
     'abi-encode',
-    'constructor(address,string,address,(string,uint256)[],uint256,uint256,uint256,address[])',
+    'constructor(address,string,address,(string,uint256)[],uint256,uint256,uint256,uint256,(uint256,uint256,uint256),address[])',
     config.extensionCenter,
     config.scopeTokenSymbol,
     config.airdropToken,
     communities,
-    String(config.startRound),
-    String(config.roundCount),
-    String(config.quotaMultiplier),
+    String(config.slTokenLockWeight),
+    String(config.stTokenLockWeight),
+    String(config.govRewardBurnWeight),
+    String(config.actionRewardBurnWeight),
+    `(${config.startRound},${config.roundCount},${config.quotaMultiplier})`,
     factories,
   ], { stage: 'burn:encode-constructor' }).stdout;
   const receipt = JSON.parse(runner.run([
@@ -1070,12 +1078,17 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     { symbol: scopeTokenSymbol, token: core.firstToken, weight: 1, label: '主社区' },
     { symbol: childTokenSymbol, token: child, weight: 2, label: '子社区' },
   ];
+  const categoryWeights = { sl: 1, st: 3, gov: 5, action: 7 };
   console.log(`  burn: deploying integration contract with explicit startRound=${groupRound}`);
   const burnAddress = deployIntegrationBurn(root, deployer, runner, {
     airdropToken: core.rootParent,
     communities,
     extensionCenter: extensionParams.centerAddress,
     factories,
+    slTokenLockWeight: categoryWeights.sl,
+    stTokenLockWeight: categoryWeights.st,
+    govRewardBurnWeight: categoryWeights.gov,
+    actionRewardBurnWeight: categoryWeights.action,
     quotaMultiplier: 5,
     roundCount: 3,
     scopeTokenSymbol,
@@ -1093,6 +1106,10 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   assert.equal(uint(burn.call('roundCount()(uint256)', [], 'burn:round-count')), 3n);
   assert.equal(uint(burn.call('endRound()(uint256)', [], 'burn:end-round')), endRound);
   assert.equal(uint(burn.call('quotaMultiplier()(uint256)', [], 'burn:quota-multiplier')), 5n);
+  assert.equal(uint(burn.call('slTokenLockWeight()(uint256)', [], 'burn:sl-weight')), 1n);
+  assert.equal(uint(burn.call('stTokenLockWeight()(uint256)', [], 'burn:st-weight')), 3n);
+  assert.equal(uint(burn.call('govRewardBurnWeight()(uint256)', [], 'burn:gov-weight')), 5n);
+  assert.equal(uint(burn.call('actionRewardBurnWeight()(uint256)', [], 'burn:action-weight')), 7n);
   assert.equal(uint(burn.call('totalCommunityWeight()(uint256)', [], 'burn:total-community-weight')), 3n);
   assert.equal(uint(burn.call('remainingAirdropShare()(uint256)', [], 'burn:remaining-share')), WAD);
   assert.deepEqual(addresses(burn.call('communities()(address[])', [], 'burn:communities')).map(lower), [core.firstToken, child].map(lower));
@@ -1519,6 +1536,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
       startRound: groupRound,
       endRound,
       communities,
+      categoryWeights,
       factories,
       theory,
       theoreticalCommunities,
