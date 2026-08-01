@@ -28,15 +28,15 @@ npm run integration -- burn
 
 - 运行时覆盖 `IBurn.sol` 全部 41 个外部函数，接口新增或遗漏会使测试失败。
 - 覆盖两个社区和多个参与地址。
-- 覆盖 SL、ST、治理奖励和行动奖励销毁。
+- 覆盖 SL、治理奖励和行动奖励销毁；ST 权重为 `0`，锁定必须以 `CategoryDisabled()` 失败。
 - 覆盖基础行动、LP V1、LP V2、链群行动、链群服务五类行动来源。
 - 覆盖 LP 扩展的 Factory 创建、行动提交、投票、注册、加入、验证、领取奖励和销毁。
 - 校验基础行动和四类扩展在 ExtensionCenter 中的 Factory 映射。
-- 校验 `CommunityConfigFrozen`、`SupportedExtensionFactoryFrozen`、`SLTokenLocked`、`STTokenLocked`、`GovRewardTokenBurned`、`ActionRewardTokenBurned`、`AirdropClaimed` 全部 7 类事件。
+- 校验 `CommunityConfigFrozen`、`SupportedExtensionFactoryFrozen`、`SLTokenLocked`、`GovRewardTokenBurned`、`ActionRewardTokenBurned`、`AirdropClaimed` 事件；禁用的 ST 类别不得产生锁定事件。
 - 通过 ABI 结构化解码校验每个 indexed topic 和 data 字段，不只检查 `topic0` 或事件数量。
 - 校验操作数量、得分系数、操作得分、地址与社区全周期累计数量和累计得分。
 - 连续覆盖三个销毁轮次，以真实事件校验开始、中间、最后一轮的 `scoreBase²`、`scoreBase¹`、`1` 三档得分系数。
-- 校验构造期社区权重、`1:3:5:7` 四类资产权重、`scoreBase`、部署时供应量、单轮激励以及全部受支持 Factory。
+- 校验构造期社区权重、`1:0:5:7` 四类资产权重、`scoreBase`、部署时供应量、单轮激励以及全部受支持 Factory。
 - 校验双地址空投事件中的份额、实际领取量、领取顺序和领取后的剩余份额。
 - 所有结构化返回通过 Cast JSON 输出解析，避免终端科学计数注释影响断言。
 - 数值报告覆盖部署权重与 `scoreBase`、各社区和地址的四类全周期累计数量/得分、首轮与末轮的截至轮次累计数量/得分、轮次 multiplier、双地址空投份额、领取数量及剩余份额/余额。
@@ -44,6 +44,7 @@ npm run integration -- burn
 ## 失败与原子性
 
 - Burn 周期结束前领取空投必须以 `ShareNotFinalized()` 失败。
+- ST 类别权重为 `0` 时，锁定必须以 `CategoryDisabled()` 失败。
 - Burn 周期结束后的写操作必须以 `RoundNotOpen(uint256,uint256)` 失败。
 - 同一地址二次领取空投必须以 `AirdropAlreadyClaimed()` 失败。
 - 行动奖励批量销毁中后续项目超过 quota 时，整批交易必须以 `BurnQuotaExceeded(uint256,uint256)` 回滚。

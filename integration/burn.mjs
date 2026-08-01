@@ -1078,7 +1078,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     { symbol: scopeTokenSymbol, token: core.firstToken, weight: 1, label: '主社区' },
     { symbol: childTokenSymbol, token: child, weight: 2, label: '子社区' },
   ];
-  const categoryWeights = { sl: 1, st: 3, gov: 5, action: 7 };
+  const categoryWeights = { sl: 1, st: 0, gov: 5, action: 7 };
   console.log(`  burn: deploying integration contract with explicit startRound=${groupRound}`);
   const burnAddress = deployIntegrationBurn(root, deployer, runner, {
     airdropToken: core.rootParent,
@@ -1107,7 +1107,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   assert.equal(uint(burn.call('endRound()(uint256)', [], 'burn:end-round')), endRound);
   assert.equal(uint(burn.call('quotaMultiplier()(uint256)', [], 'burn:quota-multiplier')), 5n);
   assert.equal(uint(burn.call('slTokenLockWeight()(uint256)', [], 'burn:sl-weight')), 1n);
-  assert.equal(uint(burn.call('stTokenLockWeight()(uint256)', [], 'burn:st-weight')), 3n);
+  assert.equal(uint(burn.call('stTokenLockWeight()(uint256)', [], 'burn:st-weight')), 0n);
   assert.equal(uint(burn.call('govRewardBurnWeight()(uint256)', [], 'burn:gov-weight')), 5n);
   assert.equal(uint(burn.call('actionRewardBurnWeight()(uint256)', [], 'burn:action-weight')), 7n);
   assert.equal(uint(burn.call('totalCommunityWeight()(uint256)', [], 'burn:total-community-weight')), 3n);
@@ -1199,6 +1199,20 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     console.log('\n=== Burn integration: group round rewards and burns ===');
     advanceToRound(runner, core.verify, groupRound + 1n, 'group-round:mint');
     assert.ok(bool(burn.call('isRoundOpen(uint256)(bool)', [groupRound], 'burn:group-round-open')));
+    const disabledStLock = burn.transaction(
+      'lockSTToken(address,uint256,uint256)',
+      [core.firstToken, groupRound, 1],
+      accounts[1],
+      'burn:st-disabled',
+    );
+    expectRevertedTransaction(
+      runner,
+      disabledStLock.address,
+      disabledStLock.signature,
+      disabledStLock.args,
+      disabledStLock.account,
+      { stage: disabledStLock.stage, expectedError: 'CategoryDisabled()' },
+    );
     expectRevertedTransaction(runner, burnAddress, 'claimAirdrop()', [], accounts[3], {
       stage: 'airdrop:claim-before-finalized',
       expectedError: 'ShareNotFinalized()',
@@ -1216,12 +1230,9 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     assert.ok(bool(runner.call(fixture.setup.groupServiceExtension, 'rewardByAccount(uint256,address)(uint256,uint256,bool)', [groupRound, fixture.roles.serviceProvider.address], { stage: 'group-round:group-service-reward' })));
 
     const firstSl = address(runner.call(core.firstToken, 'slAddress()(address)', [], { stage: 'first:sl-address' }));
-    const firstSt = address(runner.call(core.firstToken, 'stAddress()(address)', [], { stage: 'first:st-address' }));
     const lockRequests = [
       { account: accounts[1], amount: positivePortion(balanceOf(runner, firstSl, accounts[1].address, 'first:sl-balance')), signature: 'lockSLToken(address,uint256,uint256)', token: core.firstToken, receipt: firstSl },
-      { account: accounts[1], amount: positivePortion(balanceOf(runner, firstSt, accounts[1].address, 'first:st-balance')), signature: 'lockSTToken(address,uint256,uint256)', token: core.firstToken, receipt: firstSt },
       { account: accounts[2], amount: positivePortion(balanceOf(runner, childReceipts.sl, accounts[2].address, 'child:sl-balance')), signature: 'lockSLToken(address,uint256,uint256)', token: child, receipt: childReceipts.sl },
-      { account: accounts[2], amount: positivePortion(balanceOf(runner, childReceipts.st, accounts[2].address, 'child:st-balance')), signature: 'lockSTToken(address,uint256,uint256)', token: child, receipt: childReceipts.st },
     ];
     const rewardAccounts = [accounts[1], baseClaimant, fixture.roles.groupActionParticipant, fixture.roles.serviceProvider];
     const uniqueRewardAccounts = [...new Map(rewardAccounts.map((account) => [lower(account.address), account])).values()];
@@ -1328,13 +1339,15 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     const accountThroughStatsSignature = `accountBurnStatsThroughRound(address,address,uint256)${statsOutput}`;
     const communityThroughStatsSignature = `communityBurnStatsThroughRound(address,uint256)${statsOutput}`;
     const childRoundStats = tupleUints(burn.callJson(`accountRoundBurnStats(address,address,uint256)${statsOutput}`, [accounts[2].address, child, groupRound], 'burn:child-round-stats')[0]);
-    assert.ok(childRoundStats[0] > 0n && childRoundStats[2] > 0n, 'Child SL/ST lock stats were not recorded');
+    assert.ok(childRoundStats[0] > 0n && childRoundStats[1] > 0n, 'Child SL lock stats were not recorded');
+    assert.deepEqual(childRoundStats.slice(2, 4), [0n, 0n], 'Disabled child ST category recorded stats');
     assert.deepEqual(
       tupleUints(burn.callJson(accountThroughStatsSignature, [accounts[2].address, child, groupRound], 'burn:child-stats-through-group-round')[0]),
       childRoundStats,
     );
     const communityRoundStats = tupleUints(burn.callJson(`communityRoundBurnStats(address,uint256)${statsOutput}`, [core.firstToken, groupRound], 'burn:first-community-round-stats')[0]);
-    assert.ok([0, 2, 4, 6].every((index) => communityRoundStats[index] > 0n), 'First community category stats were not recorded');
+    assert.ok([0, 1, 4, 5, 6, 7].every((index) => communityRoundStats[index] > 0n), 'Enabled first-community category stats were not recorded');
+    assert.deepEqual(communityRoundStats.slice(2, 4), [0n, 0n], 'Disabled first-community ST category recorded stats');
     const firstCommunityThroughGroupRound = tupleUints(
       burn.callJson(communityThroughStatsSignature, [core.firstToken, groupRound], 'burn:first-community-stats-through-group-round')[0],
     );
