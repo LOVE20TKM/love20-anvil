@@ -224,7 +224,10 @@
           "target": "burn.params",
           "values": {
             "COMMUNITY_WEIGHTS": "1",
-            "CATEGORY_WEIGHTS": "1:1:1:1",
+            "SL_TOKEN_LOCK_WEIGHT": "1",
+            "ST_TOKEN_LOCK_WEIGHT": "1",
+            "GOV_REWARD_BURN_WEIGHT": "1",
+            "ACTION_REWARD_BURN_WEIGHT": "1",
             "START_ROUND": "6",
             "ROUND_COUNT": "3",
             "QUOTA_MULTIPLIER": "5"
