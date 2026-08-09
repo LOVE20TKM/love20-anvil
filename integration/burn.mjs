@@ -1197,7 +1197,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     assert.ok(baseClaimant, 'Base action selected a non-Anvil account');
 
     console.log('\n=== Burn integration: group round rewards and burns ===');
-    advanceToRound(runner, core.verify, groupRound + 1n, 'group-round:mint');
+    advanceToRound(runner, core.vote, groupRound + 3n, 'group-round:burn-open');
     assert.ok(bool(burn.call('isRoundOpen(uint256)(bool)', [groupRound], 'burn:group-round-open')));
     const disabledStLock = burn.transaction(
       'lockSTToken(address,uint256,uint256)',
@@ -1361,7 +1361,8 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
       { actionId: lpV1ActionId, extension: lpV1.extension, kind: 'lp-v1', verifier: accounts[1] },
       { actionId: lpV2ActionId, extension: lpV2.extension, kind: 'lp-v2', verifier: accounts[2] },
     ], 'lp-round');
-    advanceToRound(runner, core.verify, lpRound + 1n, 'lp-round:mint');
+    advanceToRound(runner, core.vote, lpRound + 3n, 'lp-round:burn-open');
+    assert.equal(bool(burn.call('isRoundOpen(uint256)(bool)', [groupRound], 'burn:group-round-expired')), false);
     assert.ok(bool(burn.call('isRoundOpen(uint256)(bool)', [lpRound], 'burn:lp-round-open')));
     sendBatch(runner, [
       { address: lpV1.extension, signature: 'claimReward(uint256)', args: [lpRound], account: accounts[4], stage: 'lp-v1-round:claim' },
@@ -1421,7 +1422,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     assert.ok(lpActionIds.includes(lpV1ActionId) && lpActionIds.includes(lpV2ActionId));
 
     console.log('\n=== Burn integration: end round receipt lock ===');
-    advanceToRound(runner, core.verify, endRound + 1n, 'end-round:open');
+    advanceToRound(runner, core.vote, endRound + 3n, 'end-round:open');
     assert.ok(bool(burn.call('isRoundOpen(uint256)(bool)', [endRound], 'burn:end-round-open')));
     const endRoundSlAmount = positivePortion(balanceOf(runner, firstSl, accounts[1].address, 'end-round:sl-balance'));
     const endRoundReceipts = sendBatch(runner, [
@@ -1443,7 +1444,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     ], 'event:end-round-sl');
 
     console.log('\n=== Burn integration: finalized shares and airdrop ===');
-    advanceToRound(runner, core.verify, endRound + 2n, 'burn:finalize');
+    advanceToRound(runner, core.vote, endRound + 4n, 'burn:finalize');
     const [account1ShareText, account1Finalized] = burn.callJson('accountShare(address)(uint256,bool)', [accounts[1].address], 'burn:account1-share');
     const [account2ShareText, account2Finalized] = burn.callJson('accountShare(address)(uint256,bool)', [accounts[2].address], 'burn:account2-share');
     const account1Share = BigInt(account1ShareText);
