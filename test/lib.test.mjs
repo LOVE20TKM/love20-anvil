@@ -42,11 +42,17 @@ import {
   runIntegrationTest,
 } from '../src/integration.mjs';
 import {
+  airdropInterfaceFunctions,
+  buildAirdropSnapshot,
   burnEventSchemas,
   burnInterfaceFunctions,
-  clearNumericReport,
+  clearIntegrationOutputs,
+  decodeAirdropEvents,
   decodeBurnEvents,
   deployIntegrationBurn,
+  deployIntegrationAirdrop,
+  readGeneratedAirdropSnapshot,
+  renderAirdropNumericReport,
   renderNumericReport,
 } from '../integration/burn.mjs';
 import {
@@ -907,6 +913,81 @@ describe('integration runner', () => {
     assert.deepEqual([...burnInterfaceFunctions].sort(), functions.sort());
   });
 
+  it('keeps the Airdrop runtime coverage list aligned with IAirdrop', () => {
+    const source = readFileSync(join(testDir, '../../burn/src/interface/IAirdrop.sol'), 'utf8');
+    const publicInterface = source.slice(source.indexOf('interface IAirdrop'));
+    const functions = [...publicInterface.matchAll(/\bfunction\s+(\w+)\s*\(/g)].map((match) => match[1]);
+
+    assert.deepEqual([...airdropInterfaceFunctions].sort(), functions.sort());
+  });
+
+  it('builds Airdrop proofs compatible with sorted Merkle verification', () => {
+    const runner = new CastRunner({ rpcUrl: 'http://unused', verbose: false });
+    const snapshot = buildAirdropSnapshot(runner, [
+      { account: addr(1), share: 200000000000000000n },
+      { account: addr(2), share: 300000000000000000n },
+      { account: addr(3), share: 400000000000000000n },
+    ]);
+    assert.equal(snapshot.totalShare, 900000000000000000n);
+
+    for (const entry of snapshot.entries) {
+      const computed = entry.proof.reduce((hash, sibling) => {
+        const [a, b] = [hash, sibling].sort((x, y) => x.toLowerCase().localeCompare(y.toLowerCase()));
+        return runner.run(['keccak', `0x${a.slice(2)}${b.slice(2)}`], { stage: 'test:airdrop-proof' }).stdout;
+      }, entry.leaf);
+      assert.equal(computed, snapshot.root);
+    }
+  });
+
+  it('loads the JSON and params produced by the one-click snapshot handoff', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'love20-anvil-snapshot-'));
+    const root = join(workspace, 'love20-anvil');
+    const burnRoot = join(workspace, 'burn');
+    const burnAddress = addr(1);
+    const snapshotDirectory = join(burnRoot, `script/network/anvil/airdrops/31337-${burnAddress}-123`);
+    const merkleRoot = `0x${'ab'.repeat(32)}`;
+    const proof = `0x${'cd'.repeat(32)}`;
+    mkdirSync(root, { recursive: true });
+    mkdirSync(snapshotDirectory, { recursive: true });
+
+    try {
+      writeFileSync(join(snapshotDirectory, 'airdrop-snapshot.json'), `${JSON.stringify({
+        sourceChainId: '31337',
+        sourceBlockNumber: '123',
+        sourceBurnAddress: burnAddress,
+        merkleRoot,
+        totalShare: '900',
+        accountCount: '2',
+        entries: [
+          { account: addr(2), share: '200', proof: [proof] },
+          { account: addr(3), share: '700', proof: [] },
+        ],
+      })}\n`);
+      writeFileSync(join(snapshotDirectory, 'airdrop.params'), [
+        'SOURCE_CHAIN_ID=31337',
+        'SOURCE_BLOCK_NUMBER=123',
+        `SOURCE_BURN=${burnAddress}`,
+        `MERKLE_ROOT=${merkleRoot}`,
+        'TOTAL_SHARE=900',
+        '',
+      ].join('\n'));
+      const snapshot = readGeneratedAirdropSnapshot(snapshotDirectory);
+
+      assert.equal(snapshot.sourceChainId, 31337n);
+      assert.equal(snapshot.sourceBlockNumber, 123n);
+      assert.equal(snapshot.root, merkleRoot);
+      assert.equal(snapshot.totalShare, 900n);
+      assert.equal(JSON.parse(snapshot.content).merkleRoot, merkleRoot);
+      assert.equal(parseParams(snapshot.paramsContent).MERKLE_ROOT, merkleRoot);
+      assert.deepEqual(snapshot.entries, [
+        { account: addr(2), share: 200n, proof: [proof] },
+        { account: addr(3), share: 700n, proof: [] },
+      ]);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('keeps every Burn event schema aligned with IBurnEvents', () => {
     const source = readFileSync(join(testDir, '../../burn/src/interface/IBurn.sol'), 'utf8');
     const eventsSource = source.slice(source.indexOf('interface IBurnEvents'), source.indexOf('interface IBurnErrors'));
@@ -955,6 +1036,32 @@ describe('integration runner', () => {
     );
   });
 
+  it('decodes every indexed and data field from an Airdrop claim event', () => {
+    const runner = new CastRunner({ rpcUrl: 'http://unused', verbose: false });
+    const airdropAddress = addr(2);
+    const token = addr(3);
+    const account = addr(4);
+    const word = (value) => BigInt(value).toString(16).padStart(64, '0');
+    const topic = runner.run([
+      'sig-event',
+      'AirdropClaimed(address,address,uint256,uint256,uint256)',
+    ], { stage: 'test:airdrop-event-topic' }).stdout;
+    const receipt = {
+      raw: {
+        logs: [{
+          address: airdropAddress,
+          topics: [topic, `0x${token.slice(2).padStart(64, '0')}`, `0x${account.slice(2).padStart(64, '0')}`],
+          data: `0x${word(7)}${word(11)}${word(13)}`,
+        }],
+      },
+    };
+
+    assert.deepEqual(
+      decodeAirdropEvents(runner, receipt, airdropAddress, 'test:airdrop-event'),
+      [{ token, account, share: 7n, amount: 11n, remainingShare: 13n }],
+    );
+  });
+
   it('renders three-source numeric rows and rejects any mismatch', () => {
     const metadata = { burnAddress: addr(2), startRound: 32n, endRound: 33n };
     const rows = [
@@ -973,16 +1080,48 @@ describe('integration runner', () => {
     );
   });
 
-  it('clears a stale Burn numeric report before a new run', () => {
+  it('renders an independent Airdrop three-source numeric report', () => {
+    const metadata = {
+      airdropAddress: addr(2),
+      sourceChainId: 31337,
+      sourceBlockNumber: 123n,
+      sourceBurnAddress: addr(3),
+      merkleRoot: `0x${'ab'.repeat(32)}`,
+      totalShare: 900n,
+      entities: [{ label: '根代币', address: addr(4) }],
+    };
+    const rows = [{ section: '根代币领取', metric: 'account1领取数量', theory: 11n, contract: 11n, event: 11n }];
+
+    const report = renderAirdropNumericReport(metadata, rows);
+    assert.ok(report.includes('# Airdrop 数值集成测试报告'));
+    assert.ok(report.includes(`集成测试 Airdrop: \`${addr(2)}\``));
+    assert.ok(report.includes('来源链 ID: 31337'));
+    assert.ok(report.includes('来源区块: 123'));
+    assert.ok(report.includes(`Merkle Root: \`${metadata.merkleRoot}\``));
+    assert.match(report, /\| 根代币领取 \| account1领取数量 \| 11 \| 11 \| 11 \| PASS \|/);
+    assert.throws(
+      () => renderAirdropNumericReport(metadata, [{ ...rows[0], contract: 10n }]),
+      /account1领取数量: theory=11 contract=10 event=11/,
+    );
+  });
+
+  it('clears stale Burn and Airdrop outputs before a new run', () => {
     const root = mkdtempSync(join(tmpdir(), 'love20-anvil-report-'));
-    const reportPath = join(root, 'state/logs/burn-numeric-report.md');
+    const reportPaths = [
+      join(root, 'state/logs/burn-numeric-report.md'),
+      join(root, 'state/logs/airdrop-numeric-report.md'),
+    ];
     try {
-      mkdirSync(dirname(reportPath), { recursive: true });
-      writeFileSync(reportPath, 'stale');
+      mkdirSync(dirname(reportPaths[0]), { recursive: true });
+      for (const reportPath of reportPaths) writeFileSync(reportPath, 'stale');
+      mkdirSync(join(root, 'state/artifacts/burn'), { recursive: true });
+      writeFileSync(join(root, 'state/artifacts/burn/airdrop-snapshot.json'), 'stale');
+      writeFileSync(join(root, 'state/artifacts/burn/airdrop-deployment.json'), 'stale');
 
-      clearNumericReport(root);
+      clearIntegrationOutputs(root);
 
-      assert.equal(existsSync(reportPath), false);
+      for (const reportPath of reportPaths) assert.equal(existsSync(reportPath), false);
+      assert.equal(existsSync(join(root, 'state/artifacts/burn')), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -995,6 +1134,7 @@ describe('integration runner', () => {
     const calls = [];
     const runner = {
       rpcUrl: 'http://127.0.0.1:8545',
+      pendingNonces: new Map([[deployer.accountAddress.toLowerCase(), 7n]]),
       run(args) {
         calls.push(args);
         if (args[0] === 'abi-encode') return { stdout: '0x1234' };
@@ -1027,6 +1167,7 @@ describe('integration runner', () => {
       assert.equal(calls[0][0], 'abi-encode');
       assert.equal(calls[1][0], 'send');
       assert.equal(calls[1].at(-1), '0x60001234');
+      assert.equal(runner.pendingNonces.has(deployer.accountAddress.toLowerCase()), false);
       assert.equal(existsSync(join(root, 'burn')), false);
       assert.throws(
         () => deployIntegrationBurn(root, deployer, runner, {
@@ -1043,6 +1184,72 @@ describe('integration runner', () => {
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('deploys the integration Airdrop through the one-click workflow', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'love20-anvil-airdrop-fixture-'));
+    const root = join(workspace, 'love20-anvil');
+    const burnAddress = addr(1);
+    const snapshotDirectory = join(workspace, `burn/script/network/anvil/airdrops/31337-${burnAddress}-122`);
+    const addressFile = join(snapshotDirectory, 'address.airdrop.params');
+    const manifestPath = join(snapshotDirectory, 'airdrop-deployment.json');
+    const merkleRoot = `0x${'ab'.repeat(32)}`;
+    try {
+      mkdirSync(snapshotDirectory, { recursive: true });
+      writeFileSync(join(snapshotDirectory, 'airdrop-snapshot.json'), `${JSON.stringify({
+        sourceChainId: '31337',
+        sourceBlockNumber: '122',
+        sourceBurnAddress: burnAddress,
+        merkleRoot,
+        totalShare: '900',
+        accountCount: '1',
+        entries: [{ account: addr(2), share: '900', proof: [] }],
+      })}\n`);
+      writeFileSync(join(snapshotDirectory, 'airdrop.params'), [
+        'SOURCE_CHAIN_ID=31337',
+        'SOURCE_BLOCK_NUMBER=122',
+        `SOURCE_BURN=${burnAddress}`,
+        `MERKLE_ROOT=${merkleRoot}`,
+        'TOTAL_SHARE=900',
+        '',
+      ].join('\n'));
+      writeFileSync(addressFile, `airdropAddress=${addr(8)}\n`);
+      const manifest = {
+        network: 'anvil',
+        targetChainId: '31337',
+        airdropAddress: addr(8),
+        sourceChainId: '31337',
+        sourceBlockNumber: '122',
+        sourceBurnAddress: burnAddress,
+        merkleRoot,
+        totalShare: '900',
+        snapshot: 'airdrop-snapshot.json',
+      };
+      writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+      const deployed = deployIntegrationAirdrop(root, 31337n, burnAddress, 123n, (command, args, options) => {
+        assert.equal(command, 'bash');
+        assert.deepEqual(args, ['script/deploy/one_click_deploy_airdrop.sh', 'anvil', 'anvil']);
+        assert.equal(options.cwd, join(workspace, 'burn'));
+        assert.equal(options.env.SOURCE_BLOCK_NUMBER, '123');
+        return { status: 0, stdout: `Deployment manifest: ${manifestPath}\n`, stderr: '' };
+      });
+
+      assert.equal(deployed.airdropAddress, addr(8));
+      assert.equal(deployed.snapshot.sourceBlockNumber, 122n);
+      assert.equal(deployed.manifestContent, readFileSync(manifestPath, 'utf8'));
+
+      writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, merkleRoot: `0x${'cd'.repeat(32)}` })}\n`);
+      assert.throws(
+        () => deployIntegrationAirdrop(root, 31337n, burnAddress, 123n, () => ({
+          status: 0,
+          stdout: `Deployment manifest: ${manifestPath}\n`,
+          stderr: '',
+        })),
+        /Expected values to be strictly equal/,
+      );
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
     }
   });
 

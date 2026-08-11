@@ -5,6 +5,7 @@ state/*.json
 state/*.hex
 state/*.pid
 state/logs/
+state/artifacts/
 !state/.gitkeep
 .env
 .DS_Store

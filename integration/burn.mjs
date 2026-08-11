@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import {
   expectRevertedTransaction,
@@ -14,6 +14,7 @@ import {
   prepareGroupActionRound,
   seedConfig,
 } from '../src/group-chat-seed.mjs';
+import { parseParams } from '../src/lib.mjs';
 
 const WAD = 1_000_000_000_000_000_000n;
 const MAX_UINT = (1n << 256n) - 1n;
@@ -88,6 +89,11 @@ const BURN_CATEGORIES = [
   { categoryKey: 'gov', label: '治理奖励销毁' },
   { categoryKey: 'action', label: '行动奖励销毁' },
 ];
+const AIRDROP_CLAIMED_EVENT = {
+  name: 'AirdropClaimed',
+  indexed: [['token', 'address'], ['account', 'address']],
+  data: [['share', 'uint256'], ['amount', 'uint256'], ['remainingShare', 'uint256']],
+};
 
 function burnEventSignature(eventName) {
   const spec = BURN_EVENT_SPECS[eventName];
@@ -105,7 +111,7 @@ export const burnEventSchemas = Object.keys(BURN_EVENT_SPECS).map((eventName) =>
   };
 });
 
-export function renderNumericReport(metadata, rows) {
+function renderThreeSourceReport(title, metadataLines, rows) {
   for (const row of rows) {
     assert.equal(
       row.contract,
@@ -120,13 +126,11 @@ export function renderNumericReport(metadata, rows) {
   }
 
   return [
-    '# Burn 数值集成测试报告',
+    title,
     '',
-    `- 集成测试 Burn: \`${metadata.burnAddress}\``,
-    `- 明确配置轮次: ${metadata.startRound} - ${metadata.endRound}`,
+    ...metadataLines,
     `- 指标数: ${rows.length}`,
     '- 数值单位: 合约原始整数（WAD = 1e18）',
-    ...(metadata.entities || []).map((entity) => `- ${entity.label}: \`${entity.address}\``),
     '',
     '| 分类 | 指标 | 理论数值 | 合约数值 | 事件数值 | 结果 |',
     '| --- | --- | ---: | ---: | ---: | --- |',
@@ -135,12 +139,38 @@ export function renderNumericReport(metadata, rows) {
   ].join('\n');
 }
 
+export function renderNumericReport(metadata, rows) {
+  return renderThreeSourceReport('# Burn 数值集成测试报告', [
+    `- 集成测试 Burn: \`${metadata.burnAddress}\``,
+    `- 明确配置轮次: ${metadata.startRound} - ${metadata.endRound}`,
+    ...(metadata.entities || []).map((entity) => `- ${entity.label}: \`${entity.address}\``),
+  ], rows);
+}
+
+export function renderAirdropNumericReport(metadata, rows) {
+  return renderThreeSourceReport('# Airdrop 数值集成测试报告', [
+    `- 集成测试 Airdrop: \`${metadata.airdropAddress}\``,
+    `- 来源链 ID: ${metadata.sourceChainId}`,
+    `- 来源区块: ${metadata.sourceBlockNumber}`,
+    `- 来源 Burn: \`${metadata.sourceBurnAddress}\``,
+    `- Merkle Root: \`${metadata.merkleRoot}\``,
+    `- 快照总份额: ${metadata.totalShare}`,
+    ...(metadata.entities || []).map((entity) => `- ${entity.label}: \`${entity.address}\``),
+  ], rows);
+}
+
 function numericReportPath(root) {
   return resolve(root, 'state/logs/burn-numeric-report.md');
 }
 
-export function clearNumericReport(root) {
+function airdropNumericReportPath(root) {
+  return resolve(root, 'state/logs/airdrop-numeric-report.md');
+}
+
+export function clearIntegrationOutputs(root) {
   rmSync(numericReportPath(root), { force: true });
+  rmSync(airdropNumericReportPath(root), { force: true });
+  rmSync(resolve(root, 'state/artifacts/burn'), { recursive: true, force: true });
 }
 
 export const burnInterfaceFunctions = [
@@ -186,6 +216,118 @@ export const burnInterfaceFunctions = [
   'isParticipant',
   'accountAirdropState',
 ];
+
+export const airdropInterfaceFunctions = [
+  'sourceChainId',
+  'sourceBlockNumber',
+  'sourceBurnAddress',
+  'merkleRoot',
+  'totalShare',
+  'claimedShare',
+  'remainingShare',
+  'isClaimed',
+  'leafHash',
+  'claimableAmount',
+  'claim',
+];
+
+function keccak(runner, value, stage) {
+  return runner.run(['keccak', value], { stage }).stdout;
+}
+
+function hashPair(runner, left, right, stage) {
+  const [a, b] = [left, right].sort((x, y) => lower(x).localeCompare(lower(y)));
+  return keccak(runner, `0x${a.slice(2)}${b.slice(2)}`, stage);
+}
+
+export function buildAirdropSnapshot(runner, sourceEntries) {
+  assert.ok(sourceEntries.length > 0, 'Airdrop snapshot requires positive shares');
+  const entries = sourceEntries.map((entry, index) => {
+    const share = BigInt(entry.share);
+    assert.ok(share > 0n, `Airdrop snapshot entry ${index} has zero share`);
+    const encoded = runner.run(
+      ['abi-encode', 'f(address,uint256)', entry.account, String(share)],
+      { stage: `airdrop:snapshot:${index}:encode` },
+    ).stdout;
+    const leaf = keccak(runner, keccak(runner, encoded, `airdrop:snapshot:${index}:inner`), `airdrop:snapshot:${index}:leaf`);
+    return { account: entry.account, share, leaf };
+  });
+  const totalShare = entries.reduce((sum, entry) => sum + entry.share, 0n);
+  assert.ok(totalShare <= WAD, `Airdrop snapshot total share exceeds WAD: ${totalShare}`);
+
+  const layers = [entries.map((entry) => entry.leaf)];
+  while (layers.at(-1).length > 1) {
+    const previous = layers.at(-1);
+    const next = [];
+    for (let index = 0; index < previous.length; index += 2) {
+      next.push(index + 1 < previous.length
+        ? hashPair(runner, previous[index], previous[index + 1], `airdrop:snapshot:node:${layers.length}:${index / 2}`)
+        : previous[index]);
+    }
+    layers.push(next);
+  }
+
+  for (const [leafIndex, entry] of entries.entries()) {
+    const proof = [];
+    let index = leafIndex;
+    for (let level = 0; level + 1 < layers.length; level += 1) {
+      const sibling = index ^ 1;
+      if (sibling < layers[level].length) proof.push(layers[level][sibling]);
+      index = Math.floor(index / 2);
+    }
+    entry.proof = proof;
+  }
+
+  return { entries, root: layers.at(-1)[0], totalShare };
+}
+
+export function readGeneratedAirdropSnapshot(directory) {
+  const path = resolve(directory, 'airdrop-snapshot.json');
+  const content = readFileSync(path, 'utf8');
+  const paramsContent = readFileSync(resolve(directory, 'airdrop.params'), 'utf8');
+  const raw = JSON.parse(content);
+  const params = parseParams(paramsContent);
+  const sourceChainId = BigInt(raw.sourceChainId);
+  const sourceBlockNumber = BigInt(raw.sourceBlockNumber);
+  const totalShare = BigInt(raw.totalShare);
+  const accountCount = BigInt(raw.accountCount);
+
+  assert.ok(sourceChainId > 0n, 'Generated snapshot sourceChainId is invalid');
+  assert.ok(sourceBlockNumber > 0n, 'Generated snapshot sourceBlockNumber is invalid');
+  assert.match(raw.sourceBurnAddress || '', /^0x[0-9a-f]{40}$/i, 'Generated snapshot sourceBurnAddress is invalid');
+  assert.match(raw.merkleRoot || '', /^0x[0-9a-f]{64}$/i, 'Generated snapshot merkleRoot is invalid');
+  assert.ok(totalShare > 0n && totalShare <= WAD, 'Generated snapshot totalShare is invalid');
+  assert.ok(Array.isArray(raw.entries) && raw.entries.length > 0, 'Generated snapshot has no entries');
+  assert.equal(accountCount, BigInt(raw.entries.length), 'Generated snapshot accountCount is invalid');
+
+  const entries = raw.entries.map((entry, index) => {
+    const share = BigInt(entry.share);
+    assert.match(entry.account || '', /^0x[0-9a-f]{40}$/i, `Generated snapshot entry ${index} account is invalid`);
+    assert.ok(share > 0n, `Generated snapshot entry ${index} share is invalid`);
+    assert.ok(Array.isArray(entry.proof), `Generated snapshot entry ${index} proof is invalid`);
+    for (const node of entry.proof) assert.match(node, /^0x[0-9a-f]{64}$/i, `Generated snapshot entry ${index} proof is invalid`);
+    return { account: entry.account, share, proof: entry.proof };
+  });
+  assert.equal(new Set(entries.map((entry) => lower(entry.account))).size, entries.length, 'Generated snapshot has duplicate accounts');
+  assert.equal(entries.reduce((sum, entry) => sum + entry.share, 0n), totalShare, 'Generated snapshot shares do not sum to totalShare');
+  assert.equal(params.SOURCE_CHAIN_ID, String(sourceChainId));
+  assert.equal(params.SOURCE_BLOCK_NUMBER, String(sourceBlockNumber));
+  assert.equal(lower(params.SOURCE_BURN), lower(raw.sourceBurnAddress));
+  assert.equal(lower(params.MERKLE_ROOT), lower(raw.merkleRoot));
+  assert.equal(params.TOTAL_SHARE, String(totalShare));
+
+  return {
+    path,
+    content,
+    paramsContent,
+    sourceChainId,
+    sourceBlockNumber,
+    sourceBurnAddress: raw.sourceBurnAddress,
+    root: raw.merkleRoot,
+    totalShare,
+    entries,
+  };
+}
 
 function uint(output) {
   const match = String(output).match(/\d+/);
@@ -335,6 +477,30 @@ export function decodeBurnEvents(runner, receipt, burnAddress, eventName, stage)
         ...decodeAbiFields(runner, fields.data, log.data, `${stage}:${index}:data`),
       };
     });
+}
+
+export function decodeAirdropEvents(runner, receipt, airdropAddress, stage) {
+  const fields = AIRDROP_CLAIMED_EVENT;
+  const signature = `${fields.name}(${[...fields.indexed, ...fields.data].map(([, type]) => type).join(',')})`;
+  const topic = lower(runner.run(['sig-event', signature], { stage: `${stage}:topic` }).stdout);
+  return (receipt.raw.logs || [])
+    .filter((log) => lower(log.address) === lower(airdropAddress) && lower(log.topics?.[0]) === topic)
+    .map((log, index) => {
+      assert.equal(log.topics.length, fields.indexed.length + 1, `${stage}:${index}: indexed field count mismatch`);
+      const indexedData = `0x${log.topics.slice(1).map((value) => value.replace(/^0x/, '')).join('')}`;
+      return {
+        ...decodeAbiFields(runner, fields.indexed, indexedData, `${stage}:${index}:indexed`),
+        ...decodeAbiFields(runner, fields.data, log.data, `${stage}:${index}:data`),
+      };
+    });
+}
+
+function airdropClaimEvent(runner, receipt, airdropAddress, token, account, stage) {
+  const events = decodeAirdropEvents(runner, receipt, airdropAddress, stage);
+  assert.equal(events.length, 1, `${stage}: expected one AirdropClaimed event`);
+  assert.equal(events[0].token, lower(token), `${stage}: unexpected token`);
+  assert.equal(events[0].account, lower(account), `${stage}: unexpected account`);
+  return events[0];
 }
 
 function assertBurnEvents(runner, receipt, burnAddress, eventName, expected, stage) {
@@ -951,8 +1117,48 @@ export function deployIntegrationBurn(root, deployer, runner, config, build = sp
     '--create',
     `${bytecode}${encoded.slice(2)}`,
   ], { stage: 'burn:deploy-fixture', account: deployer.accountAddress }).stdout);
+  runner.pendingNonces?.delete(lower(deployer.accountAddress));
   assert.match(receipt.contractAddress || '', /^0x[0-9a-f]{40}$/i, 'Burn fixture deployment returned no contract address');
   return receipt.contractAddress;
+}
+
+export function deployIntegrationAirdrop(root, sourceChainId, sourceBurnAddress, sourceBlockNumber, build = spawnSync) {
+  const burnRoot = resolve(root, '../burn');
+  const result = build(
+    'bash',
+    ['script/deploy/one_click_deploy_airdrop.sh', 'anvil', 'anvil'],
+    {
+      cwd: burnRoot,
+      encoding: 'utf8',
+      env: { ...process.env, SOURCE_BLOCK_NUMBER: String(sourceBlockNumber) },
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(`Failed to deploy integration Airdrop: ${result.stderr?.trim() || result.stdout?.trim()}`);
+  }
+  const manifestPrefix = 'Deployment manifest: ';
+  const manifestLine = String(result.stdout).split(/\r?\n/).find((line) => line.startsWith(manifestPrefix));
+  assert.ok(manifestLine, 'Airdrop deployment returned no deployment manifest path');
+  const manifestPath = manifestLine.slice(manifestPrefix.length).trim();
+  const directory = dirname(manifestPath);
+  const manifestContent = readFileSync(manifestPath, 'utf8');
+  const manifest = JSON.parse(manifestContent);
+  const snapshot = readGeneratedAirdropSnapshot(directory);
+  const addressFile = resolve(directory, 'address.airdrop.params');
+  const airdropAddress = parseParams(readFileSync(addressFile, 'utf8')).airdropAddress;
+  assert.match(airdropAddress || '', /^0x[0-9a-f]{40}$/i, 'Airdrop deployment returned no contract address');
+  assert.equal(manifest.network, 'anvil');
+  assert.equal(manifest.targetChainId, String(sourceChainId));
+  assert.equal(lower(manifest.airdropAddress || ''), lower(airdropAddress));
+  assert.equal(manifest.sourceChainId, String(snapshot.sourceChainId));
+  assert.equal(manifest.sourceBlockNumber, String(snapshot.sourceBlockNumber));
+  assert.equal(lower(manifest.sourceBurnAddress || ''), lower(snapshot.sourceBurnAddress));
+  assert.equal(lower(manifest.merkleRoot || ''), lower(snapshot.root));
+  assert.equal(manifest.totalShare, String(snapshot.totalShare));
+  assert.equal(manifest.snapshot, 'airdrop-snapshot.json');
+  assert.equal(snapshot.sourceChainId, BigInt(sourceChainId));
+  assert.equal(lower(snapshot.sourceBurnAddress), lower(sourceBurnAddress));
+  return { airdropAddress, manifestContent, snapshot };
 }
 
 function burnClient(runner, contract) {
@@ -980,9 +1186,35 @@ function burnClient(runner, contract) {
   };
 }
 
+function airdropClient(runner, contract) {
+  const covered = new Set();
+  const cover = (signature) => {
+    const name = signature.slice(0, signature.indexOf('('));
+    assert.ok(airdropInterfaceFunctions.includes(name), `Unknown IAirdrop function in scenario: ${name}`);
+    covered.add(name);
+  };
+  return {
+    address: contract,
+    covered,
+    call(signature, args = [], stage, options = {}) {
+      cover(signature);
+      return runner.call(contract, signature, args, { stage, ...options });
+    },
+    transaction(signature, args, account, stage) {
+      cover(signature);
+      return { address: contract, signature, args, account, stage };
+    },
+  };
+}
+
 function assertBurnCoverage(client) {
   const missing = burnInterfaceFunctions.filter((name) => !client.covered.has(name));
   assert.deepEqual(missing, [], `IBurn functions not covered: ${missing.join(', ')}`);
+}
+
+function assertAirdropCoverage(client) {
+  const missing = airdropInterfaceFunctions.filter((name) => !client.covered.has(name));
+  assert.deepEqual(missing, [], `IAirdrop functions not covered: ${missing.join(', ')}`);
 }
 
 function assertBurnInterface(root) {
@@ -992,14 +1224,22 @@ function assertBurnInterface(root) {
   assert.deepEqual([...burnInterfaceFunctions].sort(), declared.sort(), 'Burn integration coverage list does not match IBurn');
 }
 
+function assertAirdropInterface(root) {
+  const source = readFileSync(resolve(root, '../burn/src/interface/IAirdrop.sol'), 'utf8');
+  const publicInterface = source.slice(source.indexOf('interface IAirdrop'));
+  const declared = [...publicInterface.matchAll(/\bfunction\s+(\w+)\s*\(/g)].map((match) => match[1]);
+  assert.deepEqual([...airdropInterfaceFunctions].sort(), declared.sort(), 'Airdrop integration coverage list does not match IAirdrop');
+}
+
 function positivePortion(value) {
   assert.ok(value > 0n);
   return value > 100n ? value / 100n : 1n;
 }
 
 export async function run({ accounts, deployer, graph, params, root, runner }) {
-  clearNumericReport(root);
+  clearIntegrationOutputs(root);
   assertBurnInterface(root);
+  assertAirdropInterface(root);
   const coreParams = params('core', 'address.params');
   const extensionParams = params('extension', 'address.extension.center.params');
   const lpParams = params('extension-lp', 'address.extension.lp.params');
@@ -1152,9 +1392,13 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   const theoreticalMultiplier = (token, round) => powWad(scoreBaseByToken.get(lower(token)), endRound - round);
   const multiplierChecks = [];
 
-  runner.txValue(core.rootParent, 'deposit()', WAD, [], accounts[0], { stage: 'airdrop:fund-deployer' });
+  runner.txValue(core.rootParent, 'deposit()', WAD * 4n, [], accounts[0], { stage: 'airdrop:fund-deployer' });
   pauseMining(runner, 'burn:manual-mining');
   let numericReport;
+  let airdropNumericReport;
+  let airdropAddress;
+  let airdropManifestContent;
+  let generatedSnapshot;
   try {
     console.log('\n=== Burn integration: group round verify ===');
     advanceToRound(runner, core.verify, groupRound, 'group-round:verify');
@@ -1541,6 +1785,375 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
     });
     assert.equal(balanceOf(runner, core.rootParent, accounts[1].address, 'airdrop:account1-after-rejected-claim'), before1 + claimed1);
 
+    console.log('\n=== Airdrop integration: finalized Burn snapshot and dynamic token pools ===');
+    const sourceEntries = participants.map((account) => {
+      const [shareText, finalized] = burn.callJson(
+        'accountShare(address)(uint256,bool)',
+        [account],
+        `airdrop:snapshot:share:${account}`,
+      );
+      assert.equal(finalized, 'true', `Airdrop source share is not finalized: ${account}`);
+      return { account, share: BigInt(shareText) };
+    }).filter((entry) => entry.share > 0n);
+    const expectedSnapshot = buildAirdropSnapshot(runner, sourceEntries);
+    const requestedSourceBlockNumber = uint(runner.run(
+      ['block-number', '--rpc-url', runner.rpcUrl],
+      { stage: 'airdrop:source-block' },
+    ).stdout);
+    writeFileSync(resolve(root, '../burn/script/network/anvil/address.burn.params'), `burnAddress=${burnAddress}\n`);
+    resumeMining(runner, undefined, 'airdrop:deploy:resume-mining');
+    try {
+      const deployment = deployIntegrationAirdrop(
+        root,
+        graph.network.chainId,
+        burnAddress,
+        requestedSourceBlockNumber,
+      );
+      airdropAddress = deployment.airdropAddress;
+      airdropManifestContent = deployment.manifestContent;
+      generatedSnapshot = deployment.snapshot;
+      runner.pendingNonces?.delete(lower(deployer.accountAddress));
+    } finally {
+      pauseMining(runner, 'airdrop:deploy:pause-mining');
+    }
+    const sourceBlockNumber = generatedSnapshot.sourceBlockNumber;
+    assert.equal(generatedSnapshot.sourceChainId, BigInt(graph.network.chainId));
+    assert.equal(lower(generatedSnapshot.sourceBurnAddress), lower(burnAddress));
+    assert.equal(lower(generatedSnapshot.root), lower(expectedSnapshot.root));
+    assert.equal(generatedSnapshot.totalShare, expectedSnapshot.totalShare);
+    assert.deepEqual(
+      generatedSnapshot.entries.map((entry) => ({
+        account: lower(entry.account),
+        share: entry.share,
+        proof: entry.proof.map(lower),
+      })),
+      expectedSnapshot.entries.map((entry) => ({
+        account: lower(entry.account),
+        share: entry.share,
+        proof: entry.proof.map(lower),
+      })),
+      'Forge snapshot JSON differs from independent JS reconstruction',
+    );
+    const snapshot = {
+      root: generatedSnapshot.root,
+      totalShare: generatedSnapshot.totalShare,
+      entries: generatedSnapshot.entries.map((entry, index) => ({
+        ...entry,
+        leaf: expectedSnapshot.entries[index].leaf,
+      })),
+    };
+    assert.ok(snapshot.entries.length >= 2, 'Airdrop integration requires at least two positive-share accounts');
+    console.log(`  airdrop: generated and independently verified ${generatedSnapshot.path}`);
+
+    const airdropCode = runner.run(
+      ['code', airdropAddress, '--rpc-url', runner.rpcUrl],
+      { stage: 'airdrop:deployed-code' },
+    ).stdout;
+    assert.notEqual(airdropCode, '0x', 'Airdrop has no deployed code');
+    const airdrop = airdropClient(runner, airdropAddress);
+    assert.equal(uint(airdrop.call('sourceChainId()(uint256)', [], 'airdrop:source-chain-id')), BigInt(graph.network.chainId));
+    assert.equal(uint(airdrop.call('sourceBlockNumber()(uint256)', [], 'airdrop:source-block-number')), sourceBlockNumber);
+    assert.equal(lower(address(airdrop.call('sourceBurnAddress()(address)', [], 'airdrop:source-burn'))), lower(burnAddress));
+    assert.equal(lower(airdrop.call('merkleRoot()(bytes32)', [], 'airdrop:merkle-root')), lower(snapshot.root));
+    assert.equal(uint(airdrop.call('totalShare()(uint256)', [], 'airdrop:total-share')), snapshot.totalShare);
+
+    const [firstAirdropEntry, secondAirdropEntry] = snapshot.entries;
+    const accountByAddress = new Map(accounts.map((account) => [lower(account.address), account]));
+    const firstAirdropAccount = accountByAddress.get(lower(firstAirdropEntry.account));
+    const secondAirdropAccount = accountByAddress.get(lower(secondAirdropEntry.account));
+    const unauthorizedAirdropAccount = accounts.find((account) => lower(account.address) !== lower(firstAirdropEntry.account));
+    assert.ok(
+      firstAirdropAccount && secondAirdropAccount && unauthorizedAirdropAccount,
+      'Airdrop integration account is unavailable locally',
+    );
+    const accountLabels = new Map(accounts.map((account) => [lower(account.address), account.label]));
+    const airdropRows = [];
+    assert.equal(
+      lower(airdrop.call(
+        'leafHash(address,uint256)(bytes32)',
+        [firstAirdropEntry.account, firstAirdropEntry.share],
+        'airdrop:first-leaf',
+      )),
+      lower(firstAirdropEntry.leaf),
+    );
+    assert.equal(uint(airdrop.call('claimedShare(address)(uint256)', [core.rootParent], 'airdrop:claimed-share-before')), 0n);
+    assert.equal(uint(airdrop.call('remainingShare(address)(uint256)', [core.rootParent], 'airdrop:remaining-share-before')), snapshot.totalShare);
+    assert.equal(bool(airdrop.call('isClaimed(address,address)(bool)', [core.rootParent, firstAirdropEntry.account], 'airdrop:first-claimed-before')), false);
+
+    const unauthorizedClaim = airdrop.transaction(
+      'claim(address,address,uint256,bytes32[])',
+      [core.rootParent, firstAirdropEntry.account, firstAirdropEntry.share, array(firstAirdropEntry.proof)],
+      unauthorizedAirdropAccount,
+      'airdrop:unauthorized-claim',
+    );
+    expectRevertedTransaction(
+      runner,
+      unauthorizedClaim.address,
+      unauthorizedClaim.signature,
+      unauthorizedClaim.args,
+      unauthorizedClaim.account,
+      { stage: unauthorizedClaim.stage, expectedError: 'UnauthorizedClaimer()' },
+    );
+
+    const emptyClaimArgs = [child, firstAirdropEntry.account, firstAirdropEntry.share, array(firstAirdropEntry.proof)];
+    assert.equal(uint(airdrop.call(
+      'claimableAmount(address,address,uint256,bytes32[])(uint256)',
+      emptyClaimArgs,
+      'airdrop:empty-claimable',
+    )), 0n);
+    const emptyClaim = airdrop.transaction(
+      'claim(address,address,uint256,bytes32[])',
+      emptyClaimArgs,
+      firstAirdropAccount,
+      'airdrop:empty-claim',
+    );
+    expectRevertedTransaction(runner, emptyClaim.address, emptyClaim.signature, emptyClaim.args, emptyClaim.account, {
+      stage: emptyClaim.stage,
+      expectedError: 'NoClaimableAmount()',
+    });
+    assert.equal(bool(airdrop.call('isClaimed(address,address)(bool)', [child, firstAirdropEntry.account], 'airdrop:empty-claim-state')), false);
+
+    const invalidProofClaim = airdrop.transaction(
+      'claim(address,address,uint256,bytes32[])',
+      [core.rootParent, firstAirdropEntry.account, firstAirdropEntry.share, array(secondAirdropEntry.proof)],
+      firstAirdropAccount,
+      'airdrop:invalid-proof',
+    );
+    expectRevertedTransaction(
+      runner,
+      invalidProofClaim.address,
+      invalidProofClaim.signature,
+      invalidProofClaim.args,
+      invalidProofClaim.account,
+      { stage: invalidProofClaim.stage, expectedError: 'InvalidProof()' },
+    );
+
+    const firstTokenPool = WAD * 2n;
+    const rootParentPool = WAD;
+    sendBatch(runner, [
+      {
+        address: core.rootParent,
+        signature: 'transfer(address,uint256)',
+        args: [airdropAddress, rootParentPool],
+        account: accounts[0],
+        stage: 'airdrop:fund-root-parent',
+      },
+      {
+        address: core.firstToken,
+        signature: 'transfer(address,uint256)',
+        args: [airdropAddress, firstTokenPool],
+        account: accounts[1],
+        stage: 'airdrop:fund-first-token',
+      },
+    ], 'airdrop:fund-pools');
+
+    const firstRootParentClaim = (rootParentPool * firstAirdropEntry.share) / snapshot.totalShare;
+    assert.equal(uint(airdrop.call(
+      'claimableAmount(address,address,uint256,bytes32[])(uint256)',
+      [core.rootParent, firstAirdropEntry.account, firstAirdropEntry.share, array(firstAirdropEntry.proof)],
+      'airdrop:first-root-parent-claimable',
+    )), firstRootParentClaim);
+    const firstRootParentBefore = balanceOf(runner, core.rootParent, firstAirdropEntry.account, 'airdrop:first-root-parent-before');
+    const [firstRootParentReceipt] = sendBatch(runner, [airdrop.transaction(
+      'claim(address,address,uint256,bytes32[])',
+      [core.rootParent, firstAirdropEntry.account, firstAirdropEntry.share, array(firstAirdropEntry.proof)],
+      firstAirdropAccount,
+      'airdrop:first-root-parent-claim',
+    )], 'airdrop:first-root-parent');
+    const firstRootParentActual = balanceOf(
+      runner,
+      core.rootParent,
+      firstAirdropEntry.account,
+      'airdrop:first-root-parent-after',
+    ) - firstRootParentBefore;
+    assert.equal(firstRootParentActual, firstRootParentClaim);
+    assert.equal(bool(airdrop.call('isClaimed(address,address)(bool)', [core.rootParent, firstAirdropEntry.account], 'airdrop:first-root-parent-claimed')), true);
+    assert.equal(uint(airdrop.call('claimedShare(address)(uint256)', [core.rootParent], 'airdrop:claimed-share-after-first')), firstAirdropEntry.share);
+    const firstRootParentRemaining = snapshot.totalShare - firstAirdropEntry.share;
+    const firstRootParentEvent = airdropClaimEvent(
+      runner,
+      firstRootParentReceipt,
+      airdropAddress,
+      core.rootParent,
+      firstAirdropEntry.account,
+      'report:airdrop:first-root-parent',
+    );
+    airdropRows.push(
+      {
+        section: '根代币领取',
+        metric: `${accountLabels.get(lower(firstAirdropEntry.account))}领取数量`,
+        theory: firstRootParentClaim,
+        contract: firstRootParentActual,
+        event: firstRootParentEvent.amount,
+      },
+      {
+        section: '根代币领取',
+        metric: `${accountLabels.get(lower(firstAirdropEntry.account))}领取后剩余份额`,
+        theory: firstRootParentRemaining,
+        contract: uint(airdrop.call('remainingShare(address)(uint256)', [core.rootParent], 'report:airdrop:first-root-parent:remaining')),
+        event: firstRootParentEvent.remainingShare,
+      },
+    );
+
+    const rootParentTopUp = WAD / 2n;
+    sendBatch(runner, [{
+      address: core.rootParent,
+      signature: 'transfer(address,uint256)',
+      args: [airdropAddress, rootParentTopUp],
+      account: accounts[0],
+      stage: 'airdrop:top-up-root-parent',
+    }], 'airdrop:top-up');
+    const remainingAfterFirst = snapshot.totalShare - firstAirdropEntry.share;
+    const rootParentBalanceAfterTopUp = balanceOf(runner, core.rootParent, airdropAddress, 'airdrop:root-parent-after-top-up');
+    const secondRootParentClaim = (rootParentBalanceAfterTopUp * secondAirdropEntry.share) / remainingAfterFirst;
+    const secondRootParentBefore = balanceOf(runner, core.rootParent, secondAirdropEntry.account, 'airdrop:second-root-parent-before');
+    const [secondRootParentReceipt] = sendBatch(runner, [airdrop.transaction(
+      'claim(address,address,uint256,bytes32[])',
+      [core.rootParent, secondAirdropEntry.account, secondAirdropEntry.share, array(secondAirdropEntry.proof)],
+      secondAirdropAccount,
+      'airdrop:second-root-parent-claim',
+    )], 'airdrop:second-root-parent');
+    const secondRootParentActual = balanceOf(
+      runner,
+      core.rootParent,
+      secondAirdropEntry.account,
+      'airdrop:second-root-parent-after',
+    ) - secondRootParentBefore;
+    assert.equal(secondRootParentActual, secondRootParentClaim);
+    const secondRootParentRemaining = remainingAfterFirst - secondAirdropEntry.share;
+    const secondRootParentEvent = airdropClaimEvent(
+      runner,
+      secondRootParentReceipt,
+      airdropAddress,
+      core.rootParent,
+      secondAirdropEntry.account,
+      'report:airdrop:second-root-parent',
+    );
+    airdropRows.push(
+      {
+        section: '根代币领取',
+        metric: `${accountLabels.get(lower(secondAirdropEntry.account))}领取数量`,
+        theory: secondRootParentClaim,
+        contract: secondRootParentActual,
+        event: secondRootParentEvent.amount,
+      },
+      {
+        section: '根代币领取',
+        metric: `${accountLabels.get(lower(secondAirdropEntry.account))}领取后剩余份额`,
+        theory: secondRootParentRemaining,
+        contract: uint(airdrop.call('remainingShare(address)(uint256)', [core.rootParent], 'report:airdrop:second-root-parent:remaining')),
+        event: secondRootParentEvent.remainingShare,
+      },
+    );
+
+    assert.equal(bool(airdrop.call('isClaimed(address,address)(bool)', [core.firstToken, firstAirdropEntry.account], 'airdrop:first-token-claimed-before')), false);
+    const firstTokenClaim = (firstTokenPool * firstAirdropEntry.share) / snapshot.totalShare;
+    const firstTokenBefore = balanceOf(runner, core.firstToken, firstAirdropEntry.account, 'airdrop:first-token-before');
+    const [firstTokenReceipt] = sendBatch(runner, [airdrop.transaction(
+      'claim(address,address,uint256,bytes32[])',
+      [core.firstToken, firstAirdropEntry.account, firstAirdropEntry.share, array(firstAirdropEntry.proof)],
+      firstAirdropAccount,
+      'airdrop:first-token-claim',
+    )], 'airdrop:first-token');
+    const firstTokenActual = balanceOf(runner, core.firstToken, firstAirdropEntry.account, 'airdrop:first-token-after') - firstTokenBefore;
+    assert.equal(firstTokenActual, firstTokenClaim);
+    const firstTokenRemaining = snapshot.totalShare - firstAirdropEntry.share;
+    const firstTokenEvent = airdropClaimEvent(
+      runner,
+      firstTokenReceipt,
+      airdropAddress,
+      core.firstToken,
+      firstAirdropEntry.account,
+      'report:airdrop:first-token',
+    );
+    airdropRows.push(
+      {
+        section: '首发代币领取',
+        metric: `${accountLabels.get(lower(firstAirdropEntry.account))}领取数量`,
+        theory: firstTokenClaim,
+        contract: firstTokenActual,
+        event: firstTokenEvent.amount,
+      },
+      {
+        section: '首发代币领取',
+        metric: `${accountLabels.get(lower(firstAirdropEntry.account))}领取后剩余份额`,
+        theory: firstTokenRemaining,
+        contract: uint(airdrop.call('remainingShare(address)(uint256)', [core.firstToken], 'report:airdrop:first-token:remaining')),
+        event: firstTokenEvent.remainingShare,
+      },
+    );
+
+    const duplicateClaim = airdrop.transaction(
+      'claim(address,address,uint256,bytes32[])',
+      [core.rootParent, firstAirdropEntry.account, firstAirdropEntry.share, array(firstAirdropEntry.proof)],
+      firstAirdropAccount,
+      'airdrop:duplicate-claim',
+    );
+    expectRevertedTransaction(runner, duplicateClaim.address, duplicateClaim.signature, duplicateClaim.args, duplicateClaim.account, {
+      stage: duplicateClaim.stage,
+      expectedError: 'AirdropAlreadyClaimed()',
+    });
+    const rootParentClaimedShare = firstAirdropEntry.share + secondAirdropEntry.share;
+    const rootParentFinalBalance = rootParentPool + rootParentTopUp - firstRootParentClaim - secondRootParentClaim;
+    const firstTokenFinalBalance = firstTokenPool - firstTokenClaim;
+    airdropRows.unshift({
+      section: '快照',
+      metric: '总份额',
+      theory: snapshot.totalShare,
+      contract: uint(airdrop.call('totalShare()(uint256)', [], 'report:airdrop:total-share')),
+      event: firstRootParentEvent.share + firstRootParentEvent.remainingShare,
+    });
+    airdropRows.push(
+      {
+        section: '根代币汇总',
+        metric: '累计已领取份额',
+        theory: rootParentClaimedShare,
+        contract: uint(airdrop.call('claimedShare(address)(uint256)', [core.rootParent], 'report:airdrop:root-parent:claimed-share')),
+        event: snapshot.totalShare - secondRootParentEvent.remainingShare,
+      },
+      {
+        section: '根代币汇总',
+        metric: '合约剩余代币',
+        theory: rootParentFinalBalance,
+        contract: balanceOf(runner, core.rootParent, airdropAddress, 'report:airdrop:root-parent:balance'),
+        event: rootParentPool + rootParentTopUp - firstRootParentEvent.amount - secondRootParentEvent.amount,
+      },
+      {
+        section: '首发代币汇总',
+        metric: '累计已领取份额',
+        theory: firstAirdropEntry.share,
+        contract: uint(airdrop.call('claimedShare(address)(uint256)', [core.firstToken], 'report:airdrop:first-token:claimed-share')),
+        event: snapshot.totalShare - firstTokenEvent.remainingShare,
+      },
+      {
+        section: '首发代币汇总',
+        metric: '合约剩余代币',
+        theory: firstTokenFinalBalance,
+        contract: balanceOf(runner, core.firstToken, airdropAddress, 'report:airdrop:first-token:balance'),
+        event: firstTokenPool - firstTokenEvent.amount,
+      },
+    );
+    airdropNumericReport = {
+      path: airdropNumericReportPath(root),
+      rows: airdropRows,
+      content: renderAirdropNumericReport({
+        airdropAddress,
+        sourceChainId: graph.network.chainId,
+        sourceBlockNumber,
+        sourceBurnAddress: burnAddress,
+        merkleRoot: snapshot.root,
+        totalShare: snapshot.totalShare,
+        entities: [
+          { label: '根代币', address: core.rootParent },
+          { label: '首发代币', address: core.firstToken },
+          { label: accountLabels.get(lower(firstAirdropEntry.account)), address: firstAirdropEntry.account },
+          { label: accountLabels.get(lower(secondAirdropEntry.account)), address: secondAirdropEntry.account },
+        ],
+      }, airdropRows),
+    };
+    assertAirdropCoverage(airdrop);
+    console.log(`  airdrop: covered ${airdrop.covered.size} IAirdrop functions, ${snapshot.entries.length} snapshot accounts, 2 token pools`);
+
     numericReport = buildNumericReport({
       root,
       runner,
@@ -1560,7 +2173,7 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
         { account: accounts[2].address, label: accounts[2].label },
       ],
       airdropPool,
-      accountLabels: new Map(accounts.map((account) => [lower(account.address), account.label])),
+      accountLabels,
       historyChecks: [
         { label: `${accounts[1].label}/主社区`, account: accounts[1].address, token: core.firstToken, round: groupRound },
         { label: '主社区', token: core.firstToken, round: groupRound },
@@ -1580,11 +2193,21 @@ export async function run({ accounts, deployer, graph, params, root, runner }) {
   assertBurnCoverage(burn);
   console.log(`  burn: covered ${burn.covered.size} IBurn functions, 2 communities, 5 action types, ${factories.length} factories`);
   return {
-    outputs: { 'address.burn.params': { burnAddress } },
+    outputs: {
+      'address.burn.params': { burnAddress },
+    },
     onSuccess() {
+      const artifactsDirectory = resolve(root, 'state/artifacts/burn');
       mkdirSync(resolve(root, 'state/logs'), { recursive: true });
+      mkdirSync(artifactsDirectory, { recursive: true });
       writeFileSync(numericReport.path, numericReport.content);
+      writeFileSync(airdropNumericReport.path, airdropNumericReport.content);
+      writeFileSync(resolve(artifactsDirectory, 'airdrop-snapshot.json'), generatedSnapshot.content);
+      writeFileSync(resolve(artifactsDirectory, 'airdrop.params'), generatedSnapshot.paramsContent);
+      writeFileSync(resolve(artifactsDirectory, 'airdrop-deployment.json'), airdropManifestContent);
       console.log(`  burn: numeric report passed ${numericReport.rows.length} metrics -> ${numericReport.path}`);
+      console.log(`  airdrop: numeric report passed ${airdropNumericReport.rows.length} metrics -> ${airdropNumericReport.path}`);
+      console.log(`  airdrop: snapshot and deployment artifacts -> ${artifactsDirectory}`);
     },
   };
 }

@@ -217,7 +217,7 @@
     {
       "id": "burn",
       "repo": "../burn",
-      "deployCommand": "source script/deploy/one_click_deploy.sh anvil",
+      "deployCommand": "source script/deploy/one_click_deploy_burn.sh anvil",
       "checkCommand": "source script/deploy/00_init.sh anvil && source script/deploy/99_check.sh",
       "prefill": [
         {

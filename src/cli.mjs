@@ -161,10 +161,10 @@ async function main() {
     if (!args.target) {
       throw new Error(`integration requires a target. Available: ${targets.join(', ') || '(none)'}`);
     }
-    await runIntegrationTest(graph, deployer, args.target, {
+    await withPreservedExternalRepositories(graph, () => runIntegrationTest(graph, deployer, args.target, {
       revertState: args.revertState,
       root: repoRoot,
-    });
+    }), repoRoot);
     console.log(`\nIntegration test passed: ${args.target}${args.revertState ? ' (state reverted)' : ' (state kept)'}`);
     return;
   }

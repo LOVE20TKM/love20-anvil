@@ -14,7 +14,7 @@ npm run integration -- burn
 
 测试成功或失败后默认保留 Anvil 现场。再次运行前需重启 fresh Anvil 并重新部署；需要隔离运行并在结束后回滚时使用 `npm run integration -- burn --revert-state`。
 
-每次运行开始时会先删除旧报告；仅当本轮全部校验、地址写回或链状态回滚成功后，才生成 [`state/logs/burn-numeric-report.md`](../state/logs/burn-numeric-report.md)。报告中的 Burn 就是集成场景在完成治理和子社区前置状态后部署的唯一被测实例；数值表逐项并列展示独立理论模型、该 Burn 公共查询接口和该 Burn 事件重建结果，任意三方数值不一致都会直接使集成测试失败。
+每次运行开始时会先删除旧报告和旧快照产物；仅当本轮全部校验、地址写回或链状态回滚成功后，才生成 [`state/logs/burn-numeric-report.md`](../state/logs/burn-numeric-report.md)、[`state/logs/airdrop-numeric-report.md`](../state/logs/airdrop-numeric-report.md)，并把一键脚本的原始 `airdrop-snapshot.json`、`airdrop.params` 及供前端读取的 `airdrop-deployment.json` 保存到 `state/artifacts/burn/`。部署清单绑定目标链和 Airdrop 地址及来源链、来源区块、Burn、Root、总份额，不混入普通 Burn 部署状态。两份报告分别对应本轮唯一的 Burn 和 Airdrop 实例；数值表逐项并列展示独立理论值、链上合约状态或余额、事件值，任意三方不一致都会直接使集成测试失败。
 
 ## 前置状态
 
@@ -48,6 +48,7 @@ npm run integration -- burn
 - ST 类别权重为 `0` 时，锁定必须以 `CategoryDisabled()` 失败。
 - Burn 周期结束后的写操作必须以 `RoundNotOpen(uint256,uint256)` 失败。
 - 同一地址二次领取空投必须以 `AirdropAlreadyClaimed()` 失败。
+- 非快照地址代提交领取必须以 `UnauthorizedClaimer()` 失败。
 - 行动奖励批量销毁中后续项目超过 quota 时，整批交易必须以 `BurnQuotaExceeded(uint256,uint256)` 回滚。
 - 回滚前后 LOVE20 总供应量和账户周期销毁统计保持不变。
 
@@ -58,11 +59,23 @@ npm run integration -- burn
 - 校验全局 `remainingAirdropShare()`。
 - 校验初始空投池等于两个地址领取增量与 Burn 剩余余额之和。
 
+集成场景只在 Burn 全部销毁轮次结束后，把本轮 Burn 地址临时写入隔离的 Anvil 网络目录，调用 Burn 仓库真实的 `one_click_deploy_airdrop.sh anvil anvil`。该命令内部生成或复用快照并部署唯一的 Airdrop；集成测试根据命令实际写出的 `airdrop-deployment.json` 定位版本目录，读取并校验 JSON、参数、地址和原始部署清单，再用独立 JS 实现从本轮 `participants()` 和最终 `accountShare()` 复算 Root、总份额及每个 proof，验证：
+
+- 来源链 ID、来源区块、来源 Burn、Root 和 `totalShare` 五个 immutable getter。
+- 真实一键脚本的 JSON、部署参数和独立 JS 重建结果一致；集成结束后恢复 Burn 仓库原有网络文件。
+- 快照 proof 可实际领取，包含一个空池 `NoClaimableAmount()` 和错误 proof 回滚。
+- 同一份额分别领取两种 ERC20，领取一种代币不消耗另一种代币的资格。
+- 追加同种代币后按该代币剩余份额重新计算，只有快照地址本人可以提交领取。
+- 同种代币重复领取以 `AirdropAlreadyClaimed()` 失败。
+- 独立 Airdrop 数值报告校验快照总份额、每次领取数量和领取后剩余份额，以及两种代币最终累计领取份额和合约池余额。
+
 ## 通过标准
 
 命令退出码为 0，并输出：
 
 ```text
 burn: covered 41 IBurn functions, 2 communities, 5 action types, 4 factories
+airdrop: covered 11 IAirdrop functions, <N> snapshot accounts, 2 token pools
+airdrop: numeric report passed 11 metrics -> <repo>/state/logs/airdrop-numeric-report.md
 Integration test passed: burn (state kept)
 ```
